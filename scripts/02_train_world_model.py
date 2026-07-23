@@ -9,7 +9,7 @@ from tqdm import tqdm
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from aura_agent.config import AgentConfig
 from aura_agent.encoder import Encoder, Decoder
-from aura_agent.world_model import WorldModel
+from aura_agent.world_model import DualWorldModel
 from aura_agent.memory import ReplayBuffer
 
 def train():
@@ -18,8 +18,9 @@ def train():
     
     # Initialize networks
     encoder = Encoder(config).to(config.device)
-    decoder = Decoder(config.det_state_dim + config.stoch_state_dim, config).to(config.device)
-    rssm = WorldModel(config).to(config.device)
+    # Decoder now takes input from both world models: PWM and BWM (each has h + s)
+    decoder = Decoder(2 * (config.det_state_dim + config.stoch_state_dim), config).to(config.device)
+    rssm = DualWorldModel(config).to(config.device)
     
     # Optimizer
     params = list(encoder.parameters()) + list(decoder.parameters()) + list(rssm.parameters())
@@ -61,9 +62,11 @@ def train():
             obs_flat = obs.reshape(B * T, C, H, W)
             z = encoder(obs_flat).reshape(B, T, -1)
             
-            # Initial states for RSSM (zeros)
-            h_t = torch.zeros(B, config.det_state_dim, device=config.device)
-            s_t = torch.zeros(B, config.stoch_state_dim, device=config.device)
+            # Initial states for Dual RSSM
+            h_p = torch.zeros(B, config.det_state_dim, device=config.device)
+            s_p = torch.zeros(B, config.stoch_state_dim, device=config.device)
+            h_b = torch.zeros(B, config.det_state_dim, device=config.device)
+            s_b = torch.zeros(B, config.stoch_state_dim, device=config.device)
             
             total_loss = 0
             recon_loss = 0
@@ -76,20 +79,28 @@ def train():
                 a_prev = actions[:, t-1] if t > 0 else torch.zeros(B, config.action_dim, device=config.device)
                 
                 # Reality step (posterior)
-                h_t, s_t, prior_dist, post_dist = rssm.step_posterior(h_t, s_t, a_prev, z[:, t])
+                (h_p, s_p, prior_p, post_p), (h_b, s_b, prior_b, post_b) = rssm.step_posterior(
+                    h_p, s_p, h_b, s_b, a_prev, z[:, t]
+                )
                 
-                # Decode from posterior state
-                features = torch.cat([h_t, s_t], dim=-1)
+                # Decode from posterior states of both models
+                features = torch.cat([h_p, s_p, h_b, s_b], dim=-1)
                 obs_hat = decoder(features)
                 
                 # Predict reward
-                reward_hat = rssm.reward(h_t, s_t).squeeze(-1)
+                reward_hat = rssm.reward(h_p, s_p, h_b, s_b).squeeze(-1)
                 
                 # Accumulate losses
                 recon_loss += mse_loss(obs_hat, obs[:, t])
-                kl = kl_divergence(post_dist, prior_dist).mean()
+                
+                # KL divergence for both models
+                kl_p = kl_divergence(post_p, prior_p).mean()
+                kl_b = kl_divergence(post_b, prior_b).mean()
+                
                 # Free bits optimization to prevent mode collapse (KL balancing)
-                kl_loss += torch.max(kl, torch.tensor(1.0, device=config.device))
+                kl_loss += torch.max(kl_p, torch.tensor(1.0, device=config.device))
+                kl_loss += torch.max(kl_b, torch.tensor(1.0, device=config.device))
+                
                 reward_loss += mse_loss(reward_hat, rewards[:, t])
                 
             loss = recon_loss + config.kl_scale * kl_loss + reward_loss

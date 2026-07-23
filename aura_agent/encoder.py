@@ -35,7 +35,7 @@ class Encoder(nn.Module):
         Returns: (B, latent_dim) latent vector
         """
         x = self.conv(obs)
-        x = x.view(x.size(0), -1)
+        x = x.reshape(x.size(0), -1)
         z = self.fc(x)
         return z
 

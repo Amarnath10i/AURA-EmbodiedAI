@@ -6,19 +6,17 @@ def run_pipeline():
     print("AURA Embodied AI Agent - Full Pipeline")
     print("========================================\n")
     
-    print("1. Data Collection...")
-    os.system(f"{sys.executable} scripts/01_collect_data.py --episodes 10")
+    print("1a. Active Exploration (Difficulty Level 1: Empty)...")
+    os.system(f"{sys.executable} scripts/01_active_exploration.py --episodes 5 --difficulty 1")
     
-    print("\n2. World Model Training...")
+    print("\n1b. Active Exploration (Difficulty Level 2: Static Clutter)...")
+    os.system(f"{sys.executable} scripts/01_active_exploration.py --episodes 5 --difficulty 2")
+    
+    print("\n2. Dual World Model Training...")
     os.system(f"{sys.executable} scripts/02_train_world_model.py")
     
-    print("\n3. Affordance Discovery...")
-    os.system(f"{sys.executable} scripts/03_discover_affordances.py")
-    
-    print("\n4. Agent Evaluation (Planner + World Model)...")
-    os.system(f"{sys.executable} scripts/05_evaluate.py")
-    
-    print("\nPipeline complete!")
+    print("\n[Milestone 1 Complete] Pipeline pauses here.")
+    print("Affordance Discovery and Evaluation will be added in Milestone 2/3.")
 
 if __name__ == "__main__":
     run_pipeline()

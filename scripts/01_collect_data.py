@@ -3,10 +3,10 @@ import os
 import sys
 import numpy as np
 
-# Add the parent directory to the path so we can import the sim
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'aura_warehouse_sim'))
-from warehouse_sim.sim import WarehouseSim
-from warehouse_sim.collect import smart_random_policy
+# Add the warehouse_sim directory to path so internal imports work
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'aura_warehouse_sim', 'warehouse_sim'))
+from sim import WarehouseSim
+from collect import smart_random_policy
 
 def collect(episodes: int, out_dir: str, seed: int, max_steps: int, obs_size: int):
     os.makedirs(out_dir, exist_ok=True)

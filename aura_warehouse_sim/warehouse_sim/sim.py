@@ -24,7 +24,7 @@ Observations: egocentric RGB uint8 array (obs_size x obs_size x 3), i.e. a
 top-down camera centred on and rotated with the robot (a stand-in for the RGB
 camera that DINOv3 will encode).
 
-Actions (discrete, 4): 0=forward  1=turn left  2=turn right  3=stay
+Actions (discrete, 5): 0=forward  1=turn left  2=turn right  3=stay  4=interact
 
 Everything is deterministic given (seed, actions) -> reproducible experiments.
 """
@@ -79,10 +79,10 @@ class Door:
 
 # ------------------------------ the simulator ------------------------------ #
 class WarehouseSim:
-    """2D warehouse world with dynamic obstacles and egocentric RGB rendering."""
+    """2D warehouse world with dynamic obstacles, curriculum difficulty, and egocentric RGB rendering."""
 
-    ACTIONS = {0: "forward", 1: "turn_left", 2: "turn_right", 3: "stay"}
-    N_ACTIONS = 4
+    ACTIONS = {0: "forward", 1: "turn_left", 2: "turn_right", 3: "stay", 4: "interact"}
+    N_ACTIONS = 5
 
     def __init__(
         self,
@@ -96,6 +96,7 @@ class WarehouseSim:
         n_forklifts: int = 2,
         n_boxes: int = 14,
         n_doors: int = 4,
+        difficulty: int = 4,             # 1=Empty, 2=Static Clutter, 3=Dynamic Agents, 4=Interactive (doors/box moving)
         layout_seed: int | None = None,  # fix layout while varying dynamics
     ):
         self.rng = np.random.default_rng(seed)
@@ -105,10 +106,13 @@ class WarehouseSim:
         self.obs_cells = obs_cells
         self.ppc = px_per_cell
         self.max_steps = max_steps
-        self.n_humans = n_humans
-        self.n_forklifts = n_forklifts
-        self.n_boxes = n_boxes
-        self.n_doors = n_doors
+        
+        # Difficulty scales the entities
+        self.difficulty = difficulty
+        self.n_humans = n_humans if difficulty >= 3 else 0
+        self.n_forklifts = n_forklifts if difficulty >= 3 else 0
+        self.n_boxes = n_boxes if difficulty >= 2 else 0
+        self.n_doors = n_doors if difficulty >= 4 else 0
 
         self.move_step = 0.30        # robot forward distance per step (cells)
         self.turn_step = np.deg2rad(22.5)
@@ -240,11 +244,26 @@ class WarehouseSim:
         self.events = []
         collided_with = None
 
-        # --- robot kinematics ---
+        # --- robot kinematics & interaction ---
         if action == 1:
             self.robot_theta += self.turn_step
         elif action == 2:
             self.robot_theta -= self.turn_step
+        elif action == 4: # INTERACT
+            direction = np.array([np.sin(self.robot_theta), np.cos(self.robot_theta)])
+            target_cell = tuple((self.robot_pos + direction * 1.0).astype(int))
+            # Test hypothesis: what happens if I interact?
+            if target_cell in self.box_cells:
+                # Push the box if the cell behind it is free
+                push_target = tuple((self.robot_pos + direction * 2.0).astype(int))
+                if self.grid[push_target] == 0 and push_target not in self.box_cells:
+                    self.box_cells.remove(target_cell)
+                    self.box_cells.add(push_target)
+                    self.events.append("robot_pushed_box")
+            for d in self.doors:
+                if target_cell == d.cell:
+                    d.open = not d.open
+                    self.events.append(f"robot_toggled_door")
         elif action == 0:
             direction = np.array([np.sin(self.robot_theta), np.cos(self.robot_theta)])
             target = self.robot_pos + direction * self.move_step
@@ -300,11 +319,13 @@ class WarehouseSim:
                     h.waypoints[h.wp_index] = self._rand_free_pos()
 
             # humans sometimes MOVE A NEARBY BOX -> classic AURA surprise event
-            if h.carry_cooldown > 0:
-                h.carry_cooldown -= 1
-            elif self.rng.random() < 0.01 and self.box_cells:
-                cell = min(self.box_cells,
-                           key=lambda c: np.linalg.norm(np.array(c) + 0.5 - h.pos))
+            # only happens on max difficulty
+            if self.difficulty >= 4:
+                if h.carry_cooldown > 0:
+                    h.carry_cooldown -= 1
+                elif self.rng.random() < 0.01 and self.box_cells:
+                    cell = min(self.box_cells,
+                               key=lambda c: np.linalg.norm(np.array(c) + 0.5 - h.pos))
                 if np.linalg.norm(np.array(cell) + 0.5 - h.pos) < 2.5:
                     free = [tuple(c) for c in self._free_cells(self.grid)
                             if tuple(c) not in self.box_cells]
