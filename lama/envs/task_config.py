@@ -26,7 +26,21 @@ class SensorConfig:
     look_at: tuple = (0.5, 0.0, 0.0)
 
 @dataclass
+class DomainRandomizationConfig:
+    randomize_lighting: bool = True
+    light_intensity_range: tuple = (500.0, 2000.0)
+    randomize_friction: bool = True
+    friction_range: tuple = (0.3, 1.0)
+    randomize_mass: bool = True
+    mass_scale_range: tuple = (0.8, 1.2)
+    randomize_object_pose: bool = True
+    pose_noise_range: tuple = (-0.05, 0.05) # +/- 5cm
+
+@dataclass
 class TabletopTaskConfig:
+    num_envs: int = 32 # Parallel environments
+    env_spacing: float = 2.5
+    
     robot_name: str = "franka_panda"
     # Isaac Lab standard Franka Panda asset
     robot_asset_path: str = "omniverse://localhost/NVIDIA/Assets/Isaac/4.0/Isaac/Robots/Franka/franka.usd"
@@ -40,6 +54,7 @@ class TabletopTaskConfig:
         ObjectConfig("lever", "omniverse://localhost/NVIDIA/Assets/Isaac/4.0/Isaac/Props/Blocks/lever.usd", articulation_type='revolute', initial_position=(0.5, -0.1, 0.8)),
     ])
     sensors: SensorConfig = field(default_factory=SensorConfig)
+    domain_randomization: DomainRandomizationConfig = field(default_factory=DomainRandomizationConfig)
     
     # RL/Control parameters
     action_space: int = 7 # 6 DOF end-effector pose + 1 gripper open/close

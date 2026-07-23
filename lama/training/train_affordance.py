@@ -1,129 +1,125 @@
 """
-Train the Affordance Predictor Head on pseudo-labels discovered by the clustering module.
+Trains the Affordance Predictor.
+1. Uses the trained World Model to encode the Replay Buffer into latent states.
+2. Extracts interaction outcomes and runs KMeans to discover true physical affordances.
+3. Trains the Affordance Predictor head to map (h_t, z_t) -> affordance cluster.
 """
 import os
 import sys
-import glob
 import torch
 import torch.nn as nn
-import numpy as np
+import torch.optim as optim
+import argparse
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from lama.models.encoder import VisionRobotEncoder
+from lama.envs.task_config import TabletopTaskConfig
+from lama.data.replay_buffer import ReplayBuffer
+from lama.models.world_model import DreamerWorldModel
 from lama.affordance.discovery import AffordanceDiscovery
 from lama.affordance.predictor import AffordancePredictor
 
-LATENT_DIM = 768
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-def train_affordance():
-    # ---- Load trained encoder ----
-    model_path = os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'lama_world_model.pth')
-    robot_state_dim = 14
+def train_affordances(epochs: int = 30, batch_size: int = 32, seq_len: int = 50, num_clusters: int = 8):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    config = TabletopTaskConfig()
     
-    encoder = VisionRobotEncoder(robot_state_dim=robot_state_dim, final_latent_dim=LATENT_DIM).to(DEVICE)
+    # Load World Model (Frozen)
+    world_model = DreamerWorldModel(config).to(device)
+    wm_path = os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'dreamer_world_model.pth')
+    world_model.load_state_dict(torch.load(wm_path, map_location=device, weights_only=True))
+    world_model.eval()
     
-    if os.path.exists(model_path):
-        checkpoint = torch.load(model_path, map_location=DEVICE)
-        encoder.load_state_dict(checkpoint['encoder'])
-        print("Loaded trained encoder.")
-    else:
-        print("WARNING: No trained encoder found. Using random weights.")
-
-    # ---- Load episodes and encode ----
-    dataset_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'dataset')
-    ep_dirs = sorted(glob.glob(os.path.join(dataset_dir, "episode*")))
+    # Init Discovery & Predictor
+    discovery = AffordanceDiscovery(num_clusters=num_clusters)
+    predictor = AffordancePredictor(world_model.deter_dim, world_model.stoch_dim, num_clusters).to(device)
+    optimizer = optim.Adam(predictor.parameters(), lr=1e-3)
+    criterion = nn.CrossEntropyLoss()
     
-    if not ep_dirs:
-        print(f"ERROR: No episodes found in {dataset_dir}")
+    storage_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'dataset', 'hdf5')
+    buffer = ReplayBuffer(storage_dir=storage_dir)
+    
+    # Phase 1: Affordance Discovery (KMeans)
+    print("--- Phase 1: Extracting Outcomes & Discovering Affordances ---")
+    all_outcomes = []
+    
+    # We sample a large batch to fit KMeans
+    try:
+        discovery_batch = buffer.sample_batch(100, seq_len, split="train")
+    except ValueError:
+        print("Buffer is empty.")
         return
-    
-    discovery = AffordanceDiscovery(method="kmeans", n_clusters=6)
-    
-    print("Encoding episodes and collecting transitions...")
-    encoder.eval()
+        
     with torch.no_grad():
-        for ep_dir in tqdm(ep_dirs, desc="Encoding"):
-            rgb = np.load(os.path.join(ep_dir, "rgb.npy"))
-            state = np.load(os.path.join(ep_dir, "state.npy"))
-            action = np.load(os.path.join(ep_dir, "action.npy"))
-            
-            rgb_t = torch.FloatTensor(rgb).permute(0, 3, 1, 2).to(DEVICE) / 255.0
-            state_t = torch.FloatTensor(state).to(DEVICE)
-            
-            z_all = encoder(rgb_t, state_t).cpu().numpy()  # (T, LATENT_DIM)
-            
-            # Add transitions (Δz = z_{t+1} - z_t)
-            for t in range(len(action)):
-                if t < len(z_all) - 1:
-                    action_id = int(np.argmax(np.abs(action[t])))  # Rough primitive ID
-                    discovery.add_transition(z_all[t], action_id, z_all[t+1])
-    
-    # ---- Discover Affordances ----
-    affordances = discovery.discover(min_transitions=10)
-    if not affordances:
-        print("No affordances discovered. Collect more diverse data.")
-        return
-    
-    pseudo_labels = discovery.get_pseudo_labels()
-    n_affordances = len(affordances)
-    
-    # ---- Train Predictor ----
-    predictor = AffordancePredictor(latent_dim=LATENT_DIM, n_affordances=n_affordances).to(DEVICE)
-    optimizer = torch.optim.Adam(predictor.parameters(), lr=1e-3)
-    ce_loss = nn.CrossEntropyLoss()
-    
-    z_data = torch.FloatTensor(np.array(discovery.z_t_buffer)).to(DEVICE)
-    label_data = torch.LongTensor(pseudo_labels).to(DEVICE)
-    
-    # Filter out noise labels (-1 from DBSCAN)
-    valid_mask = label_data >= 0
-    z_data = z_data[valid_mask]
-    label_data = label_data[valid_mask]
-    
-    print(f"\nTraining Affordance Predictor on {len(z_data)} samples, {n_affordances} classes...")
-    
-    predictor.train()
-    for epoch in range(30):
-        # Shuffle
-        perm = torch.randperm(len(z_data))
-        z_shuffled = z_data[perm]
-        l_shuffled = label_data[perm]
+        rgb = torch.tensor(discovery_batch["rgb"], dtype=torch.float32, device=device).permute(0, 1, 4, 2, 3) / 255.0
+        state = torch.tensor(discovery_batch["state"], dtype=torch.float32, device=device)
+        actions = torch.tensor(discovery_batch["action"], dtype=torch.float32, device=device)
+        rewards = torch.tensor(discovery_batch["reward"], dtype=torch.float32, device=device)
         
-        total_loss = 0.0
-        correct = 0
+        obs = {"rgb": rgb, "state": state}
+        _, kl_stats = world_model(obs, actions)
         
-        bs = 64
-        for i in range(0, len(z_data), bs):
-            z_batch = z_shuffled[i:i+bs]
-            l_batch = l_shuffled[i:i+bs]
-            
-            logits = predictor(z_batch)
-            loss = ce_loss(logits, l_batch)
-            
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            total_loss += loss.item()
-            correct += (logits.argmax(dim=-1) == l_batch).sum().item()
+        # We use the posterior mean as the latent state representation
+        z_seq = kl_stats["post_mean"] 
         
-        acc = correct / len(z_data) * 100
-        if (epoch + 1) % 5 == 0:
-            print(f"  Epoch {epoch+1}/30  |  Loss: {total_loss:.4f}  |  Acc: {acc:.1f}%")
-    
-    # ---- Save ----
-    save_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'models')
-    os.makedirs(save_dir, exist_ok=True)
-    torch.save({
-        "predictor": predictor.state_dict(),
-        "n_affordances": n_affordances,
-        "affordance_names": [a.label for a in affordances],
-    }, os.path.join(save_dir, "affordance_predictor.pth"))
-    print(f"Saved affordance predictor ({n_affordances} affordances).")
-
+        outcomes_np = discovery.extract_outcomes(actions, z_seq, rewards)
+        discovery.fit(outcomes_np)
+        
+    # Phase 2: Train Predictor Head
+    print("--- Phase 2: Training Affordance Predictor ---")
+    for epoch in range(1, epochs + 1):
+        batch = buffer.sample_batch(batch_size, seq_len, split="train")
+        
+        rgb = torch.tensor(batch["rgb"], dtype=torch.float32, device=device).permute(0, 1, 4, 2, 3) / 255.0
+        state = torch.tensor(batch["state"], dtype=torch.float32, device=device)
+        actions = torch.tensor(batch["action"], dtype=torch.float32, device=device)
+        rewards = torch.tensor(batch["reward"], dtype=torch.float32, device=device)
+        
+        with torch.no_grad():
+            obs = {"rgb": rgb, "state": state}
+            _, kl_stats = world_model(obs, actions)
+            h_seq = kl_stats["post_mean"] # Simplified: should be actual deterministic h, using z for now
+            z_seq = kl_stats["post_mean"]
+            
+            outcomes_np = discovery.extract_outcomes(actions, z_seq, rewards)
+            labels_np = discovery.predict(outcomes_np)
+            labels = torch.tensor(labels_np, dtype=torch.long, device=device)
+            
+            # Re-shape h and z to align with outcomes (T-1)
+            h_in = h_seq[:, :-1].reshape(-1, world_model.deter_dim) # Actually using z_seq size here, fix below
+            z_in = z_seq[:, :-1].reshape(-1, world_model.stoch_dim)
+            
+            # Correcting dummy h extraction:
+            # We need to extract the exact h_seq from the forward pass.
+            # For simplicity in this script, we'll run a quick loop to get true h_seq
+            B, T = actions.shape[:2]
+            embed_flat = world_model.encoder(rgb.reshape(B*T, 3, 256, 256), state.reshape(B*T, -1))
+            embed = embed_flat.reshape(B, T, world_model.embed_dim)
+            h_0, z_0 = world_model.rssM.initial_state(B, device)
+            
+            h_true_seq = []
+            for t in range(T):
+                a_t = actions[:, t] if t > 0 else torch.zeros_like(actions[:, 0])
+                h_0, z_0, _, _ = world_model.rssM.step_posterior(h_0, z_0, a_t, embed[:, t])
+                h_true_seq.append(h_0)
+            
+            h_true_seq = torch.stack(h_true_seq, dim=1)
+            h_in = h_true_seq[:, :-1].reshape(-1, world_model.deter_dim)
+            
+        # Train Predictor
+        optimizer.zero_grad()
+        logits = predictor(h_in, z_in)
+        loss = criterion(logits, labels)
+        
+        loss.backward()
+        optimizer.step()
+        
+        acc = (logits.argmax(dim=-1) == labels).float().mean()
+        print(f"Epoch {epoch:03d} | Loss: {loss.item():.4f} | Accuracy: {acc.item():.2f}")
+        
+    save_path = os.path.join(os.path.dirname(__file__), '..', '..', 'models', 'affordance_predictor.pth')
+    torch.save(predictor.state_dict(), save_path)
+    print(f"Saved Affordance Predictor to {save_path}")
 
 if __name__ == "__main__":
-    train_affordance()
+    train_affordances()

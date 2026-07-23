@@ -1,87 +1,76 @@
+"""
+Dreamer-style Recurrent State Space Model (RSSM) for LAMA.
+Includes the Representation Model (Posterior) and Dynamics Model (Prior).
+"""
 import torch
 import torch.nn as nn
-from torch.distributions import Normal
+from typing import Tuple, Dict
 
-class CoreRSSM(nn.Module):
-    """
-    The core recurrent state-space model used for LAMA.
-    Takes the fused vision+proprioception latent (z_t).
-    """
-    def __init__(self, action_dim: int, latent_dim: int = 768, det_state_dim: int = 256, stoch_state_dim: int = 32):
+class RSSM(nn.Module):
+    def __init__(self, action_dim: int, embed_dim: int = 512, deter_dim: int = 256, stoch_dim: int = 32):
         super().__init__()
-        self.det_state_dim = det_state_dim
-        self.stoch_state_dim = stoch_state_dim
+        self.deter_dim = deter_dim
+        self.stoch_dim = stoch_dim
         
-        # Transition Model
-        self.fc_in = nn.Sequential(
-            nn.Linear(stoch_state_dim + action_dim, 256),
-            nn.ReLU()
-        )
-        self.gru = nn.GRUCell(256, det_state_dim)
+        # RNN Cell for deterministic state (h)
+        self.cell = nn.GRUCell(self.stoch_dim + action_dim, self.deter_dim)
         
-        # Prior Model: s_t_hat = f(h_t)
-        self.prior_fc = nn.Sequential(
-            nn.Linear(det_state_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 2 * stoch_state_dim)
+        # Prior Model: p(z_t | h_t)
+        self.prior_net = nn.Sequential(
+            nn.Linear(self.deter_dim, 256),
+            nn.ELU(),
+            nn.Linear(256, 2 * self.stoch_dim) # Outputs mean and std
         )
         
-        # Posterior Model: s_t = f(h_t, z_t)
-        self.posterior_fc = nn.Sequential(
-            nn.Linear(det_state_dim + latent_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, 2 * stoch_state_dim)
+        # Posterior (Representation) Model: q(z_t | h_t, e_t)
+        self.posterior_net = nn.Sequential(
+            nn.Linear(self.deter_dim + embed_dim, 256),
+            nn.ELU(),
+            nn.Linear(256, 2 * self.stoch_dim)
         )
-        
-    def step_prior(self, h_prev: torch.Tensor, s_prev: torch.Tensor, a_prev: torch.Tensor):
-        x = torch.cat([s_prev, a_prev], dim=-1)
-        x = self.fc_in(x)
-        h_t = self.gru(x, h_prev)
-        
-        x_prior = self.prior_fc(h_t)
-        mean, log_std = torch.chunk(x_prior, 2, dim=-1)
-        std = torch.exp(torch.clamp(log_std, min=-5.0, max=2.0))
-        dist = Normal(mean, std)
-        s_t = dist.rsample()
-        return h_t, s_t, dist
-        
-    def step_posterior(self, h_prev: torch.Tensor, s_prev: torch.Tensor, a_prev: torch.Tensor, z_t: torch.Tensor):
-        x = torch.cat([s_prev, a_prev], dim=-1)
-        x = self.fc_in(x)
-        h_t = self.gru(x, h_prev)
-        
-        x_prior = self.prior_fc(h_t)
-        prior_mean, prior_log_std = torch.chunk(x_prior, 2, dim=-1)
-        prior_std = torch.exp(torch.clamp(prior_log_std, min=-5.0, max=2.0))
-        prior_dist = Normal(prior_mean, prior_std)
-        
-        x_post = torch.cat([h_t, z_t], dim=-1)
-        x_post = self.posterior_fc(x_post)
-        post_mean, post_log_std = torch.chunk(x_post, 2, dim=-1)
-        post_std = torch.exp(torch.clamp(post_log_std, min=-5.0, max=2.0))
-        post_dist = Normal(post_mean, post_std)
-        s_t = post_dist.rsample()
-        
-        return h_t, s_t, prior_dist, post_dist
 
+    def initial_state(self, batch_size: int, device: str) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Returns initial (h_0, z_0)"""
+        h = torch.zeros((batch_size, self.deter_dim), device=device)
+        z = torch.zeros((batch_size, self.stoch_dim), device=device)
+        return h, z
 
-class DualWorldModel(nn.Module):
-    """
-    LAMA Dual World Model for Isaac Lab.
-    PWM: Physical World Model (objects/blocks)
-    BWM: Behavior World Model (agents/robot dynamics)
-    """
-    def __init__(self, action_dim: int, latent_dim: int = 768):
-        super().__init__()
-        self.pwm = CoreRSSM(action_dim, latent_dim)
-        self.bwm = CoreRSSM(action_dim, latent_dim)
+    def step_prior(self, h_prev: torch.Tensor, z_prev: torch.Tensor, action: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Dict]:
+        """
+        Rolls forward the dynamics model without observation.
+        h_t = f(h_{t-1}, z_{t-1}, a_{t-1})
+        z_t ~ p(z_t | h_t)
+        """
+        rnn_in = torch.cat([z_prev, action], dim=-1)
+        h_t = self.cell(rnn_in, h_prev)
         
-    def step_prior(self, h_prev_p, s_prev_p, h_prev_b, s_prev_b, a_prev):
-        h_t_p, s_t_p, prior_p = self.pwm.step_prior(h_prev_p, s_prev_p, a_prev)
-        h_t_b, s_t_b, prior_b = self.bwm.step_prior(h_prev_b, s_prev_b, a_prev)
-        return (h_t_p, s_t_p, prior_p), (h_t_b, s_t_b, prior_b)
+        prior_stats = self.prior_net(h_t)
+        prior_mean, prior_std = torch.chunk(prior_stats, 2, dim=-1)
+        prior_std = torch.nn.functional.softplus(prior_std) + 0.1 # Min std
         
-    def step_posterior(self, h_prev_p, s_prev_p, h_prev_b, s_prev_b, a_prev, z_t):
-        h_t_p, s_t_p, prior_p, post_p = self.pwm.step_posterior(h_prev_p, s_prev_p, a_prev, z_t)
-        h_t_b, s_t_b, prior_b, post_b = self.bwm.step_posterior(h_prev_b, s_prev_b, a_prev, z_t)
-        return (h_t_p, s_t_p, prior_p, post_p), (h_t_b, s_t_b, prior_b, post_b)
+        # Sample prior
+        prior_z = prior_mean + prior_std * torch.randn_like(prior_mean)
+        
+        stats = {"prior_mean": prior_mean, "prior_std": prior_std}
+        return h_t, prior_z, stats
+
+    def step_posterior(self, h_prev: torch.Tensor, z_prev: torch.Tensor, action: torch.Tensor, obs_embed: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, Dict, Dict]:
+        """
+        Rolls forward the representation model with observation.
+        h_t = f(h_{t-1}, z_{t-1}, a_{t-1})
+        z_t ~ q(z_t | h_t, e_t)
+        """
+        # First compute deterministic state and prior
+        h_t, prior_z, prior_stats = self.step_prior(h_prev, z_prev, action)
+        
+        # Then compute posterior
+        post_in = torch.cat([h_t, obs_embed], dim=-1)
+        post_stats = self.posterior_net(post_in)
+        post_mean, post_std = torch.chunk(post_stats, 2, dim=-1)
+        post_std = torch.nn.functional.softplus(post_std) + 0.1
+        
+        # Sample posterior
+        post_z = post_mean + post_std * torch.randn_like(post_mean)
+        
+        p_stats = {"post_mean": post_mean, "post_std": post_std}
+        return h_t, post_z, prior_stats, p_stats

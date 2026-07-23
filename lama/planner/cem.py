@@ -1,88 +1,76 @@
 """
-Cross-Entropy Method (CEM) Planner (Phase 8)
-=============================================
-Uses the trained Dual World Model to imagine future trajectories,
-then selects the action sequence that maximizes expected reward.
-
-    Current state -> Encode -> Latent z
-        -> World model rollout (10-20 steps)
-            -> Evaluate cumulative reward for each candidate sequence
-        -> Select best sequence
-        -> Execute only the first action
-        -> Repeat (Model Predictive Control / MPC)
+Cross-Entropy Method (CEM) Planner.
+Uses the DreamerWorldModel to imagine future rollouts and select actions
+that maximize predicted intrinsic/extrinsic reward.
 """
 import torch
-import numpy as np
-from lama.models.forward_model import DualWorldModel
-from lama.models.decoder import RewardModel
+import torch.nn as nn
+from typing import Tuple
+
+from lama.models.world_model import DreamerWorldModel
 
 class CEMPlanner:
     def __init__(
         self, 
-        action_dim: int, 
-        world_model: DualWorldModel,
-        reward_model: RewardModel,
+        world_model: DreamerWorldModel, 
+        action_dim: int,
         horizon: int = 15,
-        candidates: int = 256,
-        top_k: int = 32,
-        iterations: int = 5,
+        num_samples: int = 1000,
+        num_elites: int = 100,
+        num_iters: int = 5,
         device: str = "cuda"
     ):
-        self.action_dim = action_dim
         self.world_model = world_model
-        self.reward_model = reward_model
+        self.action_dim = action_dim
         self.horizon = horizon
-        self.candidates = candidates
-        self.top_k = top_k
-        self.iterations = iterations
+        self.num_samples = num_samples
+        self.num_elites = num_elites
+        self.num_iters = num_iters
         self.device = device
         
     @torch.no_grad()
-    def plan(self, h_p, s_p, h_b, s_b) -> np.ndarray:
+    def plan(self, h_current: torch.Tensor, z_current: torch.Tensor) -> torch.Tensor:
         """
-        Run CEM optimization to find the best action sequence.
-        Returns the first action of the best sequence.
+        Plans a sequence of actions using CEM.
+        h_current: (1, deter_dim)
+        z_current: (1, stoch_dim)
+        Returns: (action_dim,)
         """
-        # Initialize action distribution (continuous)
-        action_mean = torch.zeros(self.horizon, self.action_dim, device=self.device)
-        action_std = torch.ones(self.horizon, self.action_dim, device=self.device) * 0.5
+        # Expand current state for num_samples parallel imaginations
+        h_expand = h_current.repeat(self.num_samples, 1)
+        z_expand = z_current.repeat(self.num_samples, 1)
         
-        det_dim = h_p.size(-1)
-        stoch_dim = s_p.size(-1)
+        # Initial action distribution parameters
+        action_mean = torch.zeros((self.horizon, self.action_dim), device=self.device)
+        action_std = torch.ones((self.horizon, self.action_dim), device=self.device)
         
-        for iteration in range(self.iterations):
-            # Sample candidate action sequences
-            noise = torch.randn(self.candidates, self.horizon, self.action_dim, device=self.device)
-            actions = action_mean.unsqueeze(0) + action_std.unsqueeze(0) * noise
+        best_action = action_mean[0]
+        
+        for i in range(self.num_iters):
+            # 1. Sample action sequences: (num_samples, horizon, action_dim)
+            actions = action_mean.unsqueeze(0) + action_std.unsqueeze(0) * torch.randn(
+                (self.num_samples, self.horizon, self.action_dim), device=self.device
+            )
+            
+            # Clip actions to valid ranges (e.g. [-1, 1])
             actions = torch.clamp(actions, -1.0, 1.0)
             
-            # Expand initial states for all candidates
-            h_p_exp = h_p.expand(self.candidates, -1)
-            s_p_exp = s_p.expand(self.candidates, -1)
-            h_b_exp = h_b.expand(self.candidates, -1)
-            s_b_exp = s_b.expand(self.candidates, -1)
+            # 2. Imagine future states and get reward predictions
+            h_seq, z_seq, preds = self.world_model.imagine(h_expand, z_expand, actions)
             
-            # Imagine rollouts
-            cumulative_reward = torch.zeros(self.candidates, device=self.device)
+            # 3. Compute returns (Sum of predicted rewards)
+            # preds["reward"] is (num_samples, horizon)
+            returns = preds["reward"].sum(dim=1)
             
-            for t in range(self.horizon):
-                a_t = actions[:, t]
-                
-                (h_p_exp, s_p_exp, _), (h_b_exp, s_b_exp, _) = self.world_model.step_prior(
-                    h_p_exp, s_p_exp, h_b_exp, s_b_exp, a_t
-                )
-                
-                features = torch.cat([h_p_exp, s_p_exp, h_b_exp, s_b_exp], dim=-1)
-                reward = self.reward_model(features).squeeze(-1)
-                cumulative_reward += reward * (0.99 ** t) # Discounting
+            # 4. Find Elites
+            elite_idxs = torch.argsort(returns, descending=True)[:self.num_elites]
+            elite_actions = actions[elite_idxs] # (num_elites, horizon, action_dim)
             
-            # Select top-k sequences
-            _, topk_idx = torch.topk(cumulative_reward, self.top_k)
-            elite_actions = actions[topk_idx]
-            
-            # Refit the distribution
+            # 5. Update Distribution
             action_mean = elite_actions.mean(dim=0)
-            action_std = elite_actions.std(dim=0) + 1e-6
-        
-        # Return the first action of the optimized sequence
-        return action_mean[0].cpu().numpy()
+            action_std = elite_actions.std(dim=0)
+            
+            # Save the best action just in case it's the final iteration
+            best_action = elite_actions[0, 0]
+            
+        return best_action

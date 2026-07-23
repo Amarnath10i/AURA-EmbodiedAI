@@ -1,52 +1,65 @@
+"""
+Vision + Proprioception Encoder for LAMA.
+Now upgraded to use a frozen DINOv2 ViT-S Foundation Model for robust visual representations.
+"""
 import torch
 import torch.nn as nn
-import torchvision.models as models
+import torchvision.transforms as T
 
 class VisionRobotEncoder(nn.Module):
-    """
-    Fuses high-dimensional RGB input with low-dimensional robot proprioception
-    into a single latent representation z.
-    
-    Uses ResNet18 as a budget stand-in for DINOv2 to allow fast local prototyping.
-    """
-    def __init__(self, robot_state_dim: int, vision_latent_dim: int = 512, final_latent_dim: int = 768):
+    def __init__(self, latent_dim: int = 512, robot_state_dim: int = 14, freeze_vision: bool = True):
         super().__init__()
         
-        # Vision Backbone: ResNet18 (Budget DINOv2)
-        resnet = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-        # Remove the final classification layer to get the 512-dim feature vector
-        self.vision_backbone = nn.Sequential(*list(resnet.children())[:-1])
+        # 1. Vision Backbone (DINOv2)
+        # Using the small version for speed/memory efficiency (384 dim output)
+        self.vision_backbone = torch.hub.load('facebookresearch/dinov2', 'dinov2_vits14')
+        self.vision_dim = 384 
         
-        # Proprioception Encoder
-        self.proprio_encoder = nn.Sequential(
+        if freeze_vision:
+            for param in self.vision_backbone.parameters():
+                param.requires_grad = False
+                
+        # DINOv2 requires 224x224 inputs normalized with ImageNet stats
+        self.transform = T.Compose([
+            T.Resize((224, 224)),
+            T.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ])
+
+        # 2. Proprioception MLP
+        self.robot_mlp = nn.Sequential(
             nn.Linear(robot_state_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 128)
+            nn.ELU(),
+            nn.Linear(64, 64)
         )
-        
-        # Fusion Layer
-        # Concatenate Vision (512) + Proprioception (128) -> 640
+        self.proprio_dim = 64
+
+        # 3. Fusion MLP
         self.fusion = nn.Sequential(
-            nn.Linear(vision_latent_dim + 128, final_latent_dim),
-            nn.LayerNorm(final_latent_dim),
-            nn.ReLU()
+            nn.Linear(self.vision_dim + self.proprio_dim, 256),
+            nn.ELU(),
+            nn.Linear(256, latent_dim)
         )
-        
+
     def forward(self, rgb: torch.Tensor, robot_state: torch.Tensor) -> torch.Tensor:
         """
-        rgb: (B, C, H, W) normalized to [0, 1]
+        rgb: (B, 3, H, W) in [0, 1]
         robot_state: (B, robot_state_dim)
-        Returns: (B, final_latent_dim)
+        Returns: (B, latent_dim)
         """
         # Encode Vision
-        v = self.vision_backbone(rgb) # (B, 512, 1, 1)
-        v = v.view(v.size(0), -1)     # (B, 512)
+        rgb_transformed = self.transform(rgb)
         
+        if not self.vision_backbone.parameters().__next__().requires_grad:
+            with torch.no_grad():
+                vision_features = self.vision_backbone(rgb_transformed)
+        else:
+            vision_features = self.vision_backbone(rgb_transformed)
+            
         # Encode Proprioception
-        p = self.proprio_encoder(robot_state) # (B, 128)
+        robot_features = self.robot_mlp(robot_state)
         
         # Fuse
-        z = torch.cat([v, p], dim=-1) # (B, 640)
-        z_out = self.fusion(z)        # (B, final_latent_dim)
+        combined = torch.cat([vision_features, robot_features], dim=-1)
+        latent = self.fusion(combined)
         
-        return z_out
+        return latent

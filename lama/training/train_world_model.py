@@ -1,183 +1,113 @@
 """
-LAMA: Train the Dual World Model (Forward Model) + Decoder + Reward Model + Inverse Dynamics.
-Loads per-episode data from the dataset/ directory.
+Training Loop for the Dreamer World Model.
+Samples batches from the HDF5 Replay Buffer and computes RSSM + Reconstruction losses.
 """
 import os
 import sys
-import glob
 import torch
 import torch.nn as nn
-import numpy as np
+import torch.optim as optim
+from torch.distributions import Normal, kl_divergence
+import argparse
 from tqdm import tqdm
-from torch.distributions.kl import kl_divergence
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-from lama.models.encoder import VisionRobotEncoder
-from lama.models.forward_model import DualWorldModel
-from lama.models.decoder import LatentDecoder, RewardModel
-from lama.models.inverse_model import InverseDynamicsModel
+from lama.models.world_model import DreamerWorldModel
 from lama.envs.task_config import TabletopTaskConfig
+from lama.data.replay_buffer import ReplayBuffer
 
-# ---- Hyperparameters ----
-LATENT_DIM = 768
-DET_STATE_DIM = 256
-STOCH_STATE_DIM = 32
-EPOCHS = 50
-BATCH_SIZE = 8
-LR = 3e-4
-KL_SCALE = 0.1
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+def compute_kl_loss(prior_mean, prior_std, post_mean, post_std):
+    """
+    Computes KL(Posterior || Prior) to train the prior.
+    Includes KL balancing (DreamerV2/V3 trick) to prevent the posterior from collapsing.
+    """
+    post_dist = Normal(post_mean, post_std)
+    prior_dist = Normal(prior_mean, prior_std)
+    
+    # KL Balancing: scale down the gradient toward the posterior
+    kl_prior = kl_divergence(post_dist.detach(), prior_dist).mean()
+    kl_post = kl_divergence(post_dist, prior_dist.detach()).mean()
+    
+    kl_loss = 0.8 * kl_prior + 0.2 * kl_post
+    return torch.clamp(kl_loss, min=1.0) # Free Nats
 
-def load_episodes(dataset_dir: str):
-    """Load all episodes from the dataset directory."""
-    episodes = []
-    ep_dirs = sorted(glob.glob(os.path.join(dataset_dir, "episode*")))
-    for ep_dir in ep_dirs:
-        ep = {
-            "rgb": np.load(os.path.join(ep_dir, "rgb.npy")),
-            "state": np.load(os.path.join(ep_dir, "state.npy")),
-            "action": np.load(os.path.join(ep_dir, "action.npy")),
-            "reward": np.load(os.path.join(ep_dir, "reward.npy")),
-        }
-        episodes.append(ep)
-    return episodes
-
-def train():
+def train_world_model(epochs: int, batch_size: int, seq_len: int, lr: float = 3e-4):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    
     config = TabletopTaskConfig()
-    state_dim = 2 * (DET_STATE_DIM + STOCH_STATE_DIM)
+    model = DreamerWorldModel(config).to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
     
-    # ---- Initialize Models ----
-    encoder = VisionRobotEncoder(
-        robot_state_dim=config.robot_state_dim,
-        final_latent_dim=LATENT_DIM
-    ).to(DEVICE)
+    storage_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'dataset', 'hdf5')
+    buffer = ReplayBuffer(storage_dir=storage_dir)
     
-    world_model = DualWorldModel(
-        action_dim=config.action_space,
-        latent_dim=LATENT_DIM
-    ).to(DEVICE)
-    
-    decoder = LatentDecoder(state_dim=state_dim, output_size=config.sensors.resolution[0]).to(DEVICE)
-    reward_model = RewardModel(state_dim=state_dim).to(DEVICE)
-    inverse_model = InverseDynamicsModel(action_dim=config.action_space, latent_dim=LATENT_DIM).to(DEVICE)
-    
-    # ---- Optimizer ----
-    all_params = (
-        list(encoder.parameters()) +
-        list(world_model.parameters()) +
-        list(decoder.parameters()) +
-        list(reward_model.parameters()) +
-        list(inverse_model.parameters())
-    )
-    optimizer = torch.optim.Adam(all_params, lr=LR)
+    # Loss functions
     mse_loss = nn.MSELoss()
-    ce_loss = nn.CrossEntropyLoss()
+    bce_loss = nn.BCEWithLogitsLoss()
     
-    # ---- Load Data ----
-    dataset_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'dataset')
-    episodes = load_episodes(dataset_dir)
-    if not episodes:
-        print(f"ERROR: No episodes found in {dataset_dir}. Run collect_demonstrations.py first.")
-        return
-    print(f"Loaded {len(episodes)} episodes from {dataset_dir}")
-    print(f"Training on device: {DEVICE}")
+    print(f"Training Dreamer World Model on {device}...")
     
-    # ---- Training Loop ----
-    for epoch in range(EPOCHS):
-        epoch_loss = 0.0
-        np.random.shuffle(episodes)
+    for epoch in range(1, epochs + 1):
+        try:
+            batch = buffer.sample_batch(batch_size, seq_len, split="train")
+        except ValueError:
+            print("Buffer is empty. Run collect_demonstrations.py first.")
+            return
+            
+        # Move to device and format shapes
+        # rgb in buffer is (B, T, H, W, C), PyTorch needs (B, T, C, H, W)
+        rgb = torch.tensor(batch["rgb"], dtype=torch.float32, device=device).permute(0, 1, 4, 2, 3) / 255.0
+        depth = torch.tensor(batch["depth"], dtype=torch.float32, device=device).unsqueeze(2) # (B, T, 1, H, W)
+        state = torch.tensor(batch["state"], dtype=torch.float32, device=device)
+        action = torch.tensor(batch["action"], dtype=torch.float32, device=device)
+        reward_target = torch.tensor(batch["reward"], dtype=torch.float32, device=device)
+        done_target = torch.tensor(batch["done"], dtype=torch.float32, device=device)
         
-        for ep in tqdm(episodes, desc=f"Epoch {epoch+1}/{EPOCHS}"):
-            T = len(ep["action"])
-            if T < 2:
-                continue
-                
-            # Prepare tensors
-            rgb = torch.FloatTensor(ep["rgb"]).permute(0, 3, 1, 2).to(DEVICE) / 255.0  # (T, 3, H, W)
-            robot_state = torch.FloatTensor(ep["state"]).to(DEVICE)                      # (T, state_dim)
-            actions = torch.FloatTensor(ep["action"]).to(DEVICE)                         # (T, action_dim)
-            rewards = torch.FloatTensor(ep["reward"]).to(DEVICE)                         # (T,)
-            
-            # Encode all timesteps
-            z_all = encoder(rgb, robot_state)  # (T, LATENT_DIM)
-            
-            # Initialize dual RSSM states
-            h_p = torch.zeros(1, DET_STATE_DIM, device=DEVICE)
-            s_p = torch.zeros(1, STOCH_STATE_DIM, device=DEVICE)
-            h_b = torch.zeros(1, DET_STATE_DIM, device=DEVICE)
-            s_b = torch.zeros(1, STOCH_STATE_DIM, device=DEVICE)
-            
-            recon_loss_total = 0.0
-            kl_loss_total = 0.0
-            reward_loss_total = 0.0
-            inverse_loss_total = 0.0
-            
-            for t in range(T):
-                a_prev = actions[t-1:t] if t > 0 else torch.zeros(1, actions.size(-1), device=DEVICE)
-                z_t = z_all[t:t+1]
-                
-                # Posterior step (reality)
-                (h_p, s_p, prior_p, post_p), (h_b, s_b, prior_b, post_b) = world_model.step_posterior(
-                    h_p, s_p, h_b, s_b, a_prev, z_t
-                )
-                
-                # Decode from posterior
-                features = torch.cat([h_p, s_p, h_b, s_b], dim=-1)
-                rgb_hat = decoder(features)
-                reward_hat = reward_model(features)
-                
-                # Reconstruction loss
-                recon_loss_total += mse_loss(rgb_hat, rgb[t:t+1])
-                
-                # KL divergence (both models, free bits)
-                kl_p = kl_divergence(post_p, prior_p).mean()
-                kl_b = kl_divergence(post_b, prior_b).mean()
-                kl_loss_total += torch.max(kl_p, torch.tensor(1.0, device=DEVICE))
-                kl_loss_total += torch.max(kl_b, torch.tensor(1.0, device=DEVICE))
-                
-                # Reward loss
-                reward_loss_total += mse_loss(reward_hat.squeeze(-1), rewards[t:t+1])
-                
-                # Inverse dynamics loss (predict action from z_t -> z_{t+1})
-                if t < T - 1:
-                    z_next = z_all[t+1:t+2]
-                    action_pred = inverse_model(z_t, z_next)
-                    # For continuous actions, use MSE
-                    inverse_loss_total += mse_loss(action_pred, actions[t:t+1])
-            
-            # Total loss
-            loss = recon_loss_total + KL_SCALE * kl_loss_total + reward_loss_total + inverse_loss_total
-            
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(all_params, 100.0)
-            optimizer.step()
-            
-            epoch_loss += loss.item()
-            
-            # Detach states for next episode
-            h_p = h_p.detach()
-            s_p = s_p.detach()
-            h_b = h_b.detach()
-            s_b = s_b.detach()
+        obs = {"rgb": rgb, "state": state}
         
-        avg_loss = epoch_loss / max(len(episodes), 1)
-        print(f"  Epoch {epoch+1}/{EPOCHS}  |  Avg Loss: {avg_loss:.4f}")
-    
-    # ---- Save Models ----
+        optimizer.zero_grad()
+        
+        # Forward pass (Posterior rollout)
+        preds, kl_stats = model(obs, action)
+        
+        # 1. Reconstruction Losses
+        loss_rgb = mse_loss(preds["rgb"], rgb)
+        # Depth might have NaN if unnormalized in real sensor, assuming normalized here
+        loss_depth = mse_loss(preds["depth"], depth) 
+        loss_state = mse_loss(preds["state"], state)
+        
+        # 2. RL Task Losses
+        loss_reward = mse_loss(preds["reward"], reward_target)
+        loss_done = bce_loss(preds["done"], done_target)
+        
+        # 3. RSSM KL Loss
+        loss_kl = compute_kl_loss(
+            kl_stats["prior_mean"], kl_stats["prior_std"],
+            kl_stats["post_mean"], kl_stats["post_std"]
+        )
+        
+        # Total Objective
+        # Scale factors are typical in Dreamer architectures
+        loss = 1.0 * loss_rgb + 1.0 * loss_depth + 1.0 * loss_state + 1.0 * loss_reward + 1.0 * loss_done + 1.0 * loss_kl
+        
+        loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), 100.0)
+        optimizer.step()
+        
+        print(f"Epoch {epoch:03d} | Total: {loss.item():.2f} | RGB: {loss_rgb.item():.2f} | KL: {loss_kl.item():.2f}")
+        
+    # Save Model
     save_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'models')
     os.makedirs(save_dir, exist_ok=True)
-    save_path = os.path.join(save_dir, "lama_world_model.pth")
-    torch.save({
-        "encoder": encoder.state_dict(),
-        "world_model": world_model.state_dict(),
-        "decoder": decoder.state_dict(),
-        "reward_model": reward_model.state_dict(),
-        "inverse_model": inverse_model.state_dict(),
-    }, save_path)
-    print(f"Saved models to {save_path}")
-
+    torch.save(model.state_dict(), os.path.join(save_dir, "dreamer_world_model.pth"))
+    print("Saved Dreamer World Model.")
 
 if __name__ == "__main__":
-    train()
+    p = argparse.ArgumentParser()
+    p.add_argument("--epochs", type=int, default=100)
+    p.add_argument("--batch", type=int, default=16)
+    p.add_argument("--seq", type=int, default=50)
+    args = p.parse_args()
+    
+    train_world_model(args.epochs, args.batch, args.seq)
