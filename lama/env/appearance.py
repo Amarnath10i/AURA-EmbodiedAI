@@ -73,6 +73,14 @@ def describe(
     gives two slightly different readings. That matters: an agent must not be
     able to resolve a look-alike pair just by staring at it, or verification
     becomes optional.
+
+    Channels near 0 or 1 (colours close to black or white, texture cues near
+    the extremes) get asymmetrically clipped, which biases their long-run
+    average slightly away from the true prototype -- on the order of 0.03 in
+    descriptor distance even after thousands of observations. This is small
+    relative to `concepts.DEFAULT_MERGE_RADIUS` and does not change which
+    kinds merge, so it is left as is rather than replaced with a
+    bias-corrected noise model.
     """
     a = _assemble(spec, is_open=is_open, toppled=toppled)
     if noise > 0.0:
