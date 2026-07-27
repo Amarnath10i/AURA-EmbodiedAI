@@ -133,11 +133,15 @@ KINDS: dict[str, KindSpec] = dict(
            (0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5), fixed=True),
 
         # -- portables: the crate/block trap -------------------------------- #
+        # Identical descriptors on purpose. A sealed crate and a solid block do
+        # not look different, and the two ways they differ -- mass, and whether
+        # there is a lid -- are both invisible until something is tried. This
+        # is the one pair appearance cannot settle at any noise level.
         _k("crate", 3.0, (0.45, 0.45), 0.42, (198, 160, 96),
            (0.6, 0.3, 0.7, 0.6, 0.4, 0.3, 0.5, 0.6), articulated=True,
            look_alike="block"),
-        _k("block", 12.0, (0.44, 0.44), 0.40, (196, 163, 92),
-           (0.6, 0.3, 0.7, 0.6, 0.4, 0.3, 0.5, 0.5), look_alike="crate"),
+        _k("block", 12.0, (0.45, 0.45), 0.42, (198, 160, 96),
+           (0.6, 0.3, 0.7, 0.6, 0.4, 0.3, 0.5, 0.6), look_alike="crate"),
         _k("toolbox", 9.0, (0.50, 0.28), 0.26, (78, 122, 150),
            (0.7, 0.5, 0.2, 0.3, 0.6, 0.6, 0.3, 0.7), articulated=True),
         _k("cup", 0.3, (0.10, 0.10), 0.14, (232, 228, 220),
