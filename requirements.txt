@@ -1,0 +1,15 @@
+# Core
+numpy>=1.26
+torch>=2.2
+
+# Rendering and figures
+pillow>=10.0
+imageio>=2.30
+matplotlib>=3.8
+
+# Tests
+pytest>=8.0
+
+# Optional: accelerates nearest-neighbour search over the affordance bank.
+# The code falls back to a numpy implementation when this is absent.
+# faiss-cpu>=1.8
