@@ -225,15 +225,15 @@ class Warehouse(Environment):
         # occupy the first few slots.
         rng.shuffle(chosen)
 
+        # Ids are opaque. Naming them after their kind would hand the agent the
+        # answer in a field it is allowed to read, and every metric would still
+        # look healthy while measuring nothing.
         self._objects = {}
-        counts: dict[str, int] = {}
         placed: list[np.ndarray] = []
-        for kind in chosen:
-            idx = counts.get(kind, 0)
-            counts[kind] = idx + 1
+        for n, kind in enumerate(chosen):
             pos = self._free_position(rng, placed)
             placed.append(pos)
-            obj = _Object(f"{kind}_{idx}", kind, pos)
+            obj = _Object(f"obj_{n:02d}", kind, pos)
             obj.locked = kind == "door"      # doors need a mechanism
             self._objects[obj.object_id] = obj
 
@@ -487,6 +487,16 @@ class WarehouseOracle:
 
     def object_kind(self, object_id: str) -> str:
         return self._world._objects[object_id].kind
+
+    def ids_of_kind(self, kind: str) -> tuple[str, ...]:
+        """Ids of every object of `kind` in the current layout.
+
+        Object ids are opaque by design, so this is the only way to find a
+        particular kind -- and it is ground truth, for evaluation and tests.
+        """
+        return tuple(
+            i for i, o in self._world._objects.items() if o.kind == kind
+        )
 
     def catalogue_affordances(self) -> tuple[Affordance, ...]:
         return catalogue.AFFORDANCES
