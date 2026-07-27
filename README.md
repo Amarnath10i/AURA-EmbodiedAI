@@ -57,7 +57,7 @@ Early. The environment is the current work.
 | Counterfactual imagination | not started |
 | Verification selection | not started |
 | Verification execution and adjudication | not started |
-| Lifelong affordance bank | not started |
+| Lifelong affordance bank | working |
 | Planner over confirmed knowledge | not started |
 | Evaluation harness and baselines | not started |
 
@@ -87,6 +87,31 @@ About 2,600 interactions per second on one core, so 10^5 interactions takes
 under a minute. That number is the reason this backend exists rather than a
 physics one: the prior work in `files/EmbodiedAI.zip` produced no signal at 186
 interaction records and concluded volume was the bottleneck.
+
+## Memory
+
+The agent never observes an object's kind, and object ids reset every episode
+-- so lifelong memory cannot be keyed on either. Instead:
+
+- **Concepts** (`lama/memory/concepts.py`) form online from appearance alone:
+  each observation merges into the nearest existing concept if close enough,
+  or starts a new one. This is the agent's own stand-in for "kind", built
+  entirely from what it can see, and it inherits the catalogue's traps: the
+  crate and block are visually identical, so they are guaranteed to share one
+  concept, forever.
+- **The affordance bank** (`lama/memory/bank.py`) holds a Bayesian belief per
+  `(concept, verb, tool concept)`, calibrated so roughly 8 clean successes
+  confirm a reliable affordance, roughly 27 clean failures refute one, and a
+  genuinely 50%-reliable affordance still confirms once enough trials pin its
+  rate down. Only `bank.confirmed()` is meant to be acted on; everything else
+  stays internal as working evidence.
+
+Run end to end against the real environment -- fetch a crate half the time and
+a block the other half, place it on the plate, log what happens -- the bank
+settles on exactly the honest answer: confident that placing something on the
+plate works, at a remote-effect (door-opens) rate of about 50%. It cannot do
+better than that, because appearance genuinely cannot tell the two apart, and
+the numbers say so instead of hiding it.
 
 ## Evaluation plan
 
