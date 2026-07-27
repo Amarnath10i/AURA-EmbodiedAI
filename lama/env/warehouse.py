@@ -69,6 +69,7 @@ class _Object:
     position: np.ndarray
     is_open: bool = False
     locked: bool = False
+    latched: bool = False            # opened by a latching mechanism
     toppled: bool = False
     carried: bool = False
     support: str | None = None       # id of the object this rests on
@@ -219,6 +220,10 @@ class Warehouse(Environment):
         chosen.append(str(rng.choice(["button", "lever", "valve"])))
         while len(chosen) < self._n_objects:
             chosen.append(str(rng.choice(pool)))
+        # Shuffled so that neither an id nor its position in the layout
+        # correlates with kind: the required kinds would otherwise always
+        # occupy the first few slots.
+        rng.shuffle(chosen)
 
         self._objects = {}
         counts: dict[str, int] = {}
@@ -358,18 +363,27 @@ class Warehouse(Environment):
         door = self._objects[door_id]
         door.locked = False
         door.is_open = True
+        # Everything except the plate latches. The plate is the exception the
+        # catalogue is built around.
+        door.latched = door.latched or target.kind != "plate"
         return (RemoteEffect(door_id, Effect(aff.remote_effect)),)
 
     def _release_momentary_doors(self) -> None:
-        """Close plate-opened doors that nothing heavy is holding down."""
+        """Close plate-opened doors that nothing heavy is holding down.
+
+        A door already latched by a button, lever or valve stays open. Several
+        mechanisms can share a door, and without this check a plate would close
+        a door some other mechanism had permanently opened.
+        """
         for actuator_id, door_id in self._links.items():
             plate = self._objects.get(actuator_id)
             if plate is None or plate.kind != "plate":
                 continue
-            if not self._weighted(plate):
-                door = self._objects[door_id]
-                door.is_open = False
-                door.locked = True
+            door = self._objects[door_id]
+            if door.latched or self._weighted(plate):
+                continue
+            door.is_open = False
+            door.locked = True
 
     def _weighted(self, plate: _Object) -> bool:
         return any(
