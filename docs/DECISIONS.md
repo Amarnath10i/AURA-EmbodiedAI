@@ -87,3 +87,38 @@ plainly.
 and every file present belonged to that single commit, so no separate changes
 could be identified. Recorded here so the assumption is visible rather than
 silent.
+
+---
+
+## D4. Isaac Lab is a later backend, so the environment interface is a contract
+
+**Decision.** Isaac Lab is planned as a second environment backend in a later
+phase of the project. It is not a dependency now. Consequently, `lama/env/`
+defines an abstract environment interface first, and the fast numpy warehouse
+from D2 is one implementation of it. An `IsaacWarehouse` will be another.
+
+**Why.** The point of building the cheap environment first is that the expensive
+one can arrive later without invalidating the work. That only holds if nothing
+downstream — encoder, world model, imagination, verification, affordance bank,
+evaluation — ever touches a backend-specific detail. If those modules are
+written against a concrete numpy environment, the Isaac Lab migration becomes a
+rewrite instead of a swap. Fixing the interface now costs one file; fixing it
+later costs the codebase.
+
+**What this constrains.**
+
+- Everything downstream imports the interface, never a concrete environment.
+- Observations, actions and interaction records are typed structures defined by
+  the interface, not whatever the numpy backend happens to return.
+- Continuous quantities are used wherever a physics backend would produce them,
+  so the numpy backend does not bake in grid assumptions that PhysX cannot
+  reproduce.
+- Hidden ground-truth affordance queries, used only by evaluation, sit behind a
+  clearly marked and separately implementable part of the interface. A backend
+  that cannot answer them can still run the agent; it just cannot score it.
+- The backend is chosen by configuration, and the evaluation harness records
+  which backend produced every result.
+
+**Open question, deferred.** Isaac Lab needs a CUDA-capable NVIDIA GPU. That
+constraint is not yet confirmed for this project, and should be settled before
+the migration phase starts rather than during it.
