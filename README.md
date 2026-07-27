@@ -51,7 +51,7 @@ Early. The environment is the current work.
 
 | Component | State |
 |---|---|
-| Environment (hidden affordances, object-directed actions) | in progress |
+| Environment (hidden affordances, object-directed actions) | working |
 | Perception encoder | not started |
 | World model with calibrated uncertainty | not started |
 | Counterfactual imagination | not started |
@@ -60,6 +60,33 @@ Early. The environment is the current work.
 | Lifelong affordance bank | not started |
 | Planner over confirmed knowledge | not started |
 | Evaluation harness and baselines | not started |
+
+## The environment
+
+A numpy warehouse of objects with hidden mass and hidden affordance profiles.
+The agent sees geometry and a noisy appearance descriptor; it never sees an
+object's kind, and object ids are opaque.
+
+Twelve verbs: `approach, push, pull, lift, press, rotate, open, close, grasp,
+release, place_on, tip`. Each costs budget, including when it fails.
+
+Doors start locked, so they open only through a mechanism. Buttons, levers and
+valves latch. The pressure plate does not: standing on it opens its door only
+while you stand there, which is useless when you need to walk through. Putting
+something heavy on it opens the door for good -- an affordance that cannot be
+found by interacting with the plate alone.
+
+Which brings in the trap. A `crate` and a `block` have **identical**
+appearance descriptors. The block holds the plate down; the crate is too light.
+Nothing the agent can see will separate them, and their one observable
+difference is that the crate moves further when shoved. Two more pairs
+(`lever`/`switch`, `barrel`/`drum`) sit at about 15% confusion, so appearance
+is a useful prior there but not a reliable one.
+
+About 2,600 interactions per second on one core, so 10^5 interactions takes
+under a minute. That number is the reason this backend exists rather than a
+physics one: the prior work in `files/EmbodiedAI.zip` produced no signal at 186
+interaction records and concluded volume was the bottleneck.
 
 ## Evaluation plan
 
