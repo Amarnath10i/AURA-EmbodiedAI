@@ -109,10 +109,15 @@ def confusability(
 
     A direct read on how much work verification has to do for this pair: 0.0
     means appearance settles it, 0.5 means appearance says nothing at all.
+
+    Exact ties count as half. Kinds with identical descriptors are equidistant
+    from both prototypes by construction, and a strict comparison would score
+    that perfectly separable when it is in fact a coin flip.
     """
     rng = np.random.default_rng(seed)
     spec, pa, pb = KINDS[kind_a], prototype(kind_a), prototype(kind_b)
     obs = np.stack([describe(spec, rng, noise=noise) for _ in range(trials)])
     to_a = np.linalg.norm(obs - pa, axis=1)
     to_b = np.linalg.norm(obs - pb, axis=1)
-    return float((to_b < to_a).mean())
+    ties = np.isclose(to_a, to_b)
+    return float((to_b < to_a).mean() + 0.5 * ties.mean())
