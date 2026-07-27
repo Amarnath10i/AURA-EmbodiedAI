@@ -122,3 +122,66 @@ later costs the codebase.
 **Open question, deferred.** Isaac Lab needs a CUDA-capable NVIDIA GPU. That
 constraint is not yet confirmed for this project, and should be settled before
 the migration phase starts rather than during it.
+
+---
+
+## D5. Affordance taxonomy: a verb set, and primary versus secondary use
+
+**Decision.** Objects are understood through a fixed set of interaction verbs —
+`approach, push, pull, lift, press, rotate, open, close, grasp, release,
+place_on, tip` — and every `(object kind, verb)` pair carries a hidden
+*affordance role*:
+
+| Role | Meaning | Example |
+|---|---|---|
+| `PRIMARY` | what the object is for; its canonical function | `press` a button, `open` a door, `push` a cart |
+| `SECONDARY` | a real but non-canonical use; the object as a means to another end | `place_on` a crate onto a pressure plate to hold it down; `lift` a stool to reach a high shelf |
+| `INCIDENTAL` | works, but carries little information; nearly everything affords it weakly | nudging a shelf a centimetre |
+| `NONE` | the object does not afford this verb | `lift` a wall |
+
+**Why this is the core of the project.** The interesting claim is not "the agent
+learns objects can be pushed". It is that **canonical uses are easy to stumble
+into and improvised uses are not**. Random and curiosity-driven exploration find
+`PRIMARY` affordances readily, because they are what the object responds to most
+strongly and most often. `SECONDARY` affordances are rare, frequently
+conditional, and often only meaningful through their effect on *something else*
+in the world. If counterfactual verification has an advantage, this is where it
+shows up, so the evaluation must score `PRIMARY` and `SECONDARY` discovery
+separately. A single averaged number would hide the entire result.
+
+**Consequences for the environment.**
+
+1. **Remote effects are first-class.** An outcome may change a *different*
+   object than the one acted on (a weight on a plate opens a door across the
+   room). Without this there is no way to express "the crate's other use", and
+   secondary affordance collapses into a synonym for primary.
+2. **Relational verbs are first-class.** `place_on` takes two objects. Tool use
+   is inherently relational; a verb set of unary actions cannot represent it.
+3. **Preconditions exist.** Some affordances only hold in context — gripper
+   free, object already held, object already open. The agent must discover the
+   precondition, not just the verb.
+4. **Some outcomes are irreversible.** A verification that breaks an object, or
+   consumes it, cannot be undone. This gives hypothesis selection real stakes:
+   the cost of a test is not uniform, and an agent that ignores this will
+   destroy the evidence it needed.
+5. **Reliability is explicit.** Each true affordance carries a probability. An
+   affordance that fires 60% of the time is not the same as one the agent simply
+   has not learned yet, and separating those two is the hard part of selection.
+
+**On "instinct".** The agent should behave as though it has an intuition about
+what an object is for before touching it — the world model supplies exactly
+that: a *prior over affordances conditioned on appearance*. The loop is then
+instinct, doubt, test, knowledge. Appearance is therefore designed to be
+informative but not decisive: objects that look alike may behave differently, so
+the prior is a real hypothesis rather than a lookup, and verification has
+something to do.
+
+*Reading of the request:* "social instinct" was taken to mean this common-sense
+prior about object use. If it instead meant affordances involving other agents
+(learning by watching a human use an object), that is a different and larger
+feature; it is not built, and should get its own decision entry.
+
+**Consequences for evaluation.** The affordance bank is scored against hidden
+ground truth on precision and recall, broken out by role. Interactions spent per
+confirmed `SECONDARY` affordance is the headline efficiency number, because that
+is the quantity the baselines should struggle with.
