@@ -1,0 +1,28 @@
+# Dependencies for the Isaac Lab backend (lama/env/isaac_warehouse.py).
+#
+# Install these into a SEPARATE Python 3.10 environment from the rest of the
+# project (requirements.txt targets whatever Python this repo's tests run
+# under, which does not need to be 3.10). See docs/ISAAC_LAB_SETUP.md for the
+# full walkthrough, including why this exact version is pinned rather than
+# "latest": Isaac Sim's GPU/VRAM minimum has climbed release over release,
+# and this pin is the newest generation confirmed compatible with an
+# 8GB-class RTX card (RTX 3070/4060-tier). Installing "latest" here will very
+# likely require hardware this project does not target.
+#
+# Usage (Windows, PowerShell):
+#   py -3.10 -m venv .venv-isaac
+#   .venv-isaac\Scripts\Activate.ps1
+#   pip install --upgrade pip
+#   pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cu121
+#   pip install isaaclab[isaacsim,all]==2.1.0 --extra-index-url https://pypi.nvidia.com
+#   pip install -r requirements.txt
+#   pip install -r requirements-isaac.txt
+#
+# This file exists mainly as a version-pin record, since the Isaac Lab
+# install itself is the two pip commands above (a requirements.txt line
+# cannot express the --extra-index-url / --index-url flags they need).
+# Anything genuinely installable as a plain line lives here; the two
+# commands above must still be run manually first.
+
+# torch/torchvision and isaaclab[isaacsim,all] are installed via the explicit
+# commands above, not this file -- see the usage block.
