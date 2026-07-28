@@ -88,6 +88,13 @@ under a minute. That number is the reason this backend exists rather than a
 physics one: the prior work in `files/EmbodiedAI.zip` produced no signal at 186
 interaction records and concluded volume was the bottleneck.
 
+A second backend, `lama/env/isaac_warehouse.py`, implements the exact same
+contract on top of Isaac Lab -- real PhysX rigid bodies, so hidden mass drives
+push/pull/rotate/tip displacement through actual physics rather than a
+formula. It is **written but never run**: no RTX-class GPU has been available
+to test it. It is verified as far as possible without one (see
+`docs/ISAAC_LAB_SETUP.md`) and is waiting on real hardware to confirm the rest.
+
 ## Memory
 
 The agent never observes an object's kind, and object ids reset every episode
@@ -158,11 +165,14 @@ steps. The third is the one that matters; the first two are sanity floors.
 ## Repository layout
 
 ```
-lama/                  the LAMA system (new work)
-docs/DECISIONS.md      why the project is built this way
-aura_warehouse_sim/    prior work: AURA navigation-only warehouse prototype
-AURA_Project_Plan.pdf  prior work: the AURA research plan this project grew from
-files/EmbodiedAI.zip   prior work: an earlier object-function-discovery project
+lama/                       the LAMA system (new work)
+scripts/isaac_smoke_test.py isolates an Isaac Lab install problem from this project's code
+scripts/run_lama_isaac.py   runs the verification loop against the Isaac backend
+docs/DECISIONS.md           why the project is built this way
+docs/ISAAC_LAB_SETUP.md     Isaac Lab backend setup, pinned versions, current status
+aura_warehouse_sim/         prior work: AURA navigation-only warehouse prototype
+AURA_Project_Plan.pdf       prior work: the AURA research plan this project grew from
+files/EmbodiedAI.zip        prior work: an earlier object-function-discovery project
 ```
 
 Prior work is retained deliberately. `files/EmbodiedAI.zip` in particular
@@ -176,4 +186,9 @@ motivates LAMA's emphasis on interaction efficiency.
 pip install -r requirements.txt
 ```
 
-CPU is sufficient for everything currently planned.
+CPU is sufficient for everything currently planned on the numpy backend.
+
+To run the Isaac Lab backend, see `docs/ISAAC_LAB_SETUP.md` -- it needs a
+separate Python 3.10 environment and an RTX-class GPU, and pins specific
+Isaac Lab / Isaac Sim versions chosen for compatibility with 8GB-class cards,
+since the current latest release requires 16GB.
