@@ -25,3 +25,6 @@ Thumbs.db
 
 # Extracted archives
 files/EmbodiedAI_extracted/
+
+# External repos
+IsaacLab/
