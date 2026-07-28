@@ -185,3 +185,87 @@ feature; it is not built, and should get its own decision entry.
 ground truth on precision and recall, broken out by role. Interactions spent per
 confirmed `SECONDARY` affordance is the headline efficiency number, because that
 is the quantity the baselines should struggle with.
+
+---
+
+## D6. Isaac Lab backend: GPU question resolved, written unverified
+
+**Decision.** D4's open question -- whether GPU access for Isaac Lab was
+confirmed -- is now answered. The development machine (GTX 1650, 4GB VRAM)
+cannot run Isaac Sim at all: no RT cores, VRAM below every generation's
+minimum. The target machine (RTX 4060, 8GB VRAM, i7 12th-gen) clears the
+minimum for the Isaac Sim 4.5.0 / Isaac Lab 2.1.0 generation (RTX 3070, 8GB)
+but not the current `main`-branch minimum (RTX 4080, 16GB), which has climbed
+release over release. `lama/env/isaac_warehouse.py` and
+`docs/ISAAC_LAB_SETUP.md` pin to the 2.1.0/4.5.0 generation specifically
+because of this gap -- installing "latest" on this hardware would very likely
+fail outright.
+
+Given that, the backend was built anyway, on the machine without a capable
+GPU, entirely from current documentation, and has never been executed
+against real Isaac Sim.
+
+**Why build it unverified rather than wait.** The owner has access to the
+target machine and asked for the code and tooling to exist so it can be
+cloned and run there. Waiting would mean delivering nothing; building it
+honestly-labelled as unverified, with the verification that *is* possible
+done thoroughly, delivers a real head start and is falsifiable the moment it
+reaches real hardware.
+
+**How it was verified without the hardware.** `tests/test_isaac_warehouse_logic.py`
+injects a fake `isaaclab` package into `sys.modules`, built from real `torch`
+tensors rather than permissive mocks -- shapes and call signatures are
+actually checked. This exercises every line of `IsaacWarehouse`: every method
+call, every attribute access, the full affordance-resolution logic
+(preconditions, mechanism latching, momentary door release), and the
+flagship crate/block secondary affordance end to end. It caught one real bug
+before commit: `_body_pos` returned a numpy view aliasing the same memory as
+the live position tensor, so a before/after displacement snapshot silently
+read the *same* value twice, making every measured push distance zero. What
+this cannot verify is whether the fake's guessed signature for
+`RigidObject.set_external_force_and_torque` -- the one call flagged as
+highest-risk in the module's own docstring -- matches the real, currently
+installed Isaac Lab version. Only real hardware settles that.
+
+**Scope cuts, and why each is defensible.**
+
+- *Grasping and lifting are state bookkeeping, not physical.* There is no
+  articulated gripper anywhere in this project's agent model, on either
+  backend -- `warehouse.py` already made this simplification (D2), and the
+  Isaac backend mirrors it rather than introducing asymmetric fidelity
+  between backends for a capability neither uses.
+- *Doors do not physically swing.* `is_open`/`locked` are python state on
+  both backends. The research question is whether a mechanism's *effect* is
+  discoverable, not whether it looks like it swings; `ArticulationCfg` with a
+  revolute joint is a clean future addition if that ever matters.
+- *No collision-blocked navigation.* `APPROACH` teleports the agent on both
+  backends (D2's original navigation-is-solved reasoning applies unchanged).
+- *No camera rendering.* Both backends build `ObjectView.appearance` from the
+  same `appearance.describe` synthetic descriptor. No perception encoder
+  exists yet in this project (see the README status table), so rendering
+  real frames now would add risk and complexity in service of a consumer
+  that does not exist. Swapping in a real camera capture later is confined to
+  one call site in `IsaacWarehouse._view`.
+- *Layout composition is fixed per instance.* Isaac Sim can only be launched
+  once per process, so `IsaacWarehouse` uses a module-level singleton and
+  constructing a fresh instance per episode (the numpy backend's usual
+  pattern) is not an option. Re-randomising which kinds are spawned on
+  `reset()` would need runtime prim deletion; no clearly-documented pattern
+  for that surfaced during research done offline from real hardware, so
+  `reset()` only re-randomises dynamics (door states, agent spawn point) by
+  teleporting the same spawned objects back to their initial poses. A
+  different `layout_seed` means constructing a new instance. Documented as a
+  real, temporary gap, not silently matched to the numpy backend's semantics.
+- *Affordance-resolution logic is duplicated from `warehouse.py`, not
+  shared.* A deeper refactor (the same kind of extraction `layout.py` did for
+  kind-planning logic) was considered and rejected here specifically: a
+  shared mixin is itself new,
+  unverifiable surface area, and duplicating already-tested logic
+  line-for-line is lower risk than restructuring it blind. Flagged as a
+  future cleanup candidate once the Isaac backend has run for real and any
+  necessary fixes have landed -- refactoring before that would risk
+  reintroducing exactly the bugs the duplication was meant to avoid.
+
+**What "done" looks like next.** Someone runs `scripts/isaac_smoke_test.py`
+on the RTX 4060 machine, reports what breaks, and it gets fixed from a real
+traceback instead of more documentation research.
