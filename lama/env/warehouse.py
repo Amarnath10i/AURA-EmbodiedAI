@@ -91,7 +91,8 @@ class Warehouse(Environment):
             warehouses for the generalisation evaluation.
         budget: Interaction-budget units per episode. The episode ends when it
             runs out, which is what makes the choice of test matter.
-        n_objects: Objects placed per layout, including the required kinds.
+        n_objects: Objects placed per layout, including the required kinds
+            and one mandatory actuator (`layout.MIN_OBJECTS` is the floor).
         include_held_out: Whether the transfer-set kinds may appear. False for
             every training layout.
         appearance_noise: Per-observation descriptor noise. See

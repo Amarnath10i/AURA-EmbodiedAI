@@ -21,22 +21,29 @@ from . import catalogue
 REQUIRED_KINDS: tuple[str, ...] = ("door", "plate", "block", "crate")
 
 
+#: The four required kinds plus one mandatory actuator (button, lever or
+#: valve, so a mechanism is always reachable) -- the true floor on
+#: `n_objects`, one more than `len(REQUIRED_KINDS)` alone.
+MIN_OBJECTS: int = len(REQUIRED_KINDS) + 1
+
+
 def plan_kinds(
     rng: np.random.Generator, n_objects: int, include_held_out: bool
 ) -> list[str]:
     """The kind of each object to place, in shuffled (id-opaque) order.
 
-    Always includes `REQUIRED_KINDS` plus one actuator kind (button, lever or
-    valve, so a mechanism is always reachable), then fills the remainder at
-    random from the catalogue.
+    Always includes `REQUIRED_KINDS` plus one actuator kind, then fills the
+    remainder at random from the catalogue. Returns exactly `n_objects`
+    kinds -- `n_objects` is a count, not a floor that a mandatory addition can
+    silently exceed.
 
     Raises:
-        ValueError: if `n_objects` cannot fit `REQUIRED_KINDS`.
+        ValueError: if `n_objects` is below `MIN_OBJECTS`.
     """
-    if n_objects < len(REQUIRED_KINDS):
+    if n_objects < MIN_OBJECTS:
         raise ValueError(
-            f"n_objects must be at least {len(REQUIRED_KINDS)} to fit the "
-            f"required kinds {REQUIRED_KINDS}"
+            f"n_objects must be at least {MIN_OBJECTS} to fit the required "
+            f"kinds {REQUIRED_KINDS} plus one mandatory actuator"
         )
     pool = [
         k for k in catalogue.kinds(include_held_out)
