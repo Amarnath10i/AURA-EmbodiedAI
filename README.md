@@ -53,10 +53,10 @@ Early. The environment is the current work.
 |---|---|
 | Environment (hidden affordances, object-directed actions) | working |
 | Perception encoder | not started |
-| World model with calibrated uncertainty | not started |
-| Counterfactual imagination | not started |
-| Verification selection | not started |
-| Verification execution and adjudication | not started |
+| World model with calibrated uncertainty | not started (bank doubles as one, see below) |
+| Counterfactual imagination | working |
+| Verification selection | working |
+| Verification execution and adjudication | working |
 | Lifelong affordance bank | working |
 | Planner over confirmed knowledge | not started |
 | Evaluation harness and baselines | not started |
@@ -112,6 +112,34 @@ settles on exactly the honest answer: confident that placing something on the
 plate works, at a remote-effect (door-opens) rate of about 50%. It cannot do
 better than that, because appearance genuinely cannot tell the two apart, and
 the numbers say so instead of hiding it.
+
+## Imagination and verification
+
+The loop from observation to memory is closed and runs end to end:
+
+- **Imagine** (`lama/imagination/`) enumerates every verb attemptable on every
+  reachable object right now, and attaches whatever the bank already believes
+  about it -- the bank itself stands in for a world model, since a
+  nearest-concept Beta posterior is already a real prediction with a real
+  uncertainty. Only *observable* preconditions (gripper state) gate what gets
+  proposed; hidden ones are never consulted here.
+- **Select** (`lama/verification/select.py`) scores each hypothesis by how
+  much a real test would still teach the bank, divided by what it costs.
+  Settled beliefs score zero, so budget stops going toward what is already
+  known.
+- **Verify and remember** (`lama/verification/loop.py`) turns the top choice
+  into a real environment step and folds the outcome back into memory.
+
+**A known, measured limitation.** Refuting a belief takes about 27 clean
+failures (see the bank's calibration), and the acquisition function scores
+per key, not across the whole reachable set. In practice this means a cheap,
+persistently-failing verb on a single object can consume most of an episode's
+budget before the loop ever moves on -- confirmed by a pinned regression test,
+not just suspected. There is no navigation or exploration planning yet either:
+`imagine`/`select` only propose verbs on what is already in reach, so the loop
+falls back to walking toward the nearest unreached object when nothing
+reachable is worth testing. Both are real gaps `planner/` should close, not
+problems papered over here.
 
 ## Evaluation plan
 
