@@ -25,6 +25,44 @@ def _draws(kind: str, n: int, rng: np.random.Generator) -> list[np.ndarray]:
 def test_rejects_wrong_shaped_appearance():
     with pytest.raises(ValueError):
         ConceptCodebook().assign(np.zeros(3, dtype=np.float32), 0, 0)
+    with pytest.raises(ValueError):
+        ConceptCodebook().peek(np.zeros(3, dtype=np.float32))
+
+
+def test_peek_before_any_assignment_finds_nothing():
+    cb = ConceptCodebook()
+    a = describe(KINDS["cup"], np.random.default_rng(0), noise=0.0)
+    assert cb.peek(a) is None
+    assert len(cb) == 0, "peek must never create a concept"
+
+
+def test_peek_does_not_mutate_the_codebook():
+    cb = ConceptCodebook()
+    rng = np.random.default_rng(0)
+    a = describe(KINDS["cup"], rng)
+    cid = cb.assign(a, 0, 0)
+    before = cb.concept(cid).count
+
+    for _ in range(20):
+        assert cb.peek(a) == cid
+
+    assert len(cb) == 1
+    assert cb.concept(cid).count == before
+
+
+def test_peek_finds_the_same_concept_assign_would_use():
+    cb = ConceptCodebook()
+    rng = np.random.default_rng(0)
+    cid = cb.assign(describe(KINDS["crate"], rng), 0, 0)
+    a = describe(KINDS["block"], rng)  # look-alike: should match the same concept
+    assert cb.peek(a) == cid
+
+
+def test_peek_returns_none_for_something_unrelated_to_anything_seen():
+    cb = ConceptCodebook()
+    rng = np.random.default_rng(0)
+    cb.assign(describe(KINDS["cup"], rng), 0, 0)
+    assert cb.peek(describe(KINDS["pillar"], rng)) is None
 
 
 def test_repeated_identical_observations_share_one_concept():

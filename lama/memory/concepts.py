@@ -91,20 +91,45 @@ class ConceptCodebook:
         arrives later. That is a real limitation of this first implementation,
         worth knowing about rather than hiding.
         """
+        self._check_shape(appearance)
+        best_id, best_dist = self._nearest(appearance)
+        if best_id is not None and best_dist <= self.merge_radius:
+            self._merge(best_id, appearance)
+            return best_id
+        return self._new_concept(appearance, episode, t)
+
+    def peek(self, appearance: np.ndarray) -> int | None:
+        """Nearest existing concept for `appearance`, without creating or
+        updating anything.
+
+        The read-only counterpart to `assign`: for asking what is already
+        known about an object without the act of looking changing what the
+        codebook remembers. `imagination` uses this so that merely observing
+        an object -- as opposed to actually interacting with it -- never
+        forms or perturbs a concept. Returns `None` when nothing seen so far
+        is close enough to match, which is the correct answer for "this looks
+        like nothing I have ever interacted with".
+        """
+        self._check_shape(appearance)
+        best_id, best_dist = self._nearest(appearance)
+        if best_id is not None and best_dist <= self.merge_radius:
+            return best_id
+        return None
+
+    def _check_shape(self, appearance: np.ndarray) -> None:
         if appearance.shape != (APPEARANCE_DIM,):
             raise ValueError(
                 f"appearance must have shape ({APPEARANCE_DIM},), "
                 f"got {appearance.shape}"
             )
+
+    def _nearest(self, appearance: np.ndarray) -> tuple[int | None, float]:
         best_id, best_dist = None, np.inf
         for c in self._concepts:
             d = float(np.linalg.norm(c.mean - appearance))
             if d < best_dist:
                 best_id, best_dist = c.concept_id, d
-        if best_id is not None and best_dist <= self.merge_radius:
-            self._merge(best_id, appearance)
-            return best_id
-        return self._new_concept(appearance, episode, t)
+        return best_id, best_dist
 
     def _merge(self, concept_id: int, appearance: np.ndarray) -> None:
         c = self._concepts[concept_id]  # ids are dense indices; see _new_concept
