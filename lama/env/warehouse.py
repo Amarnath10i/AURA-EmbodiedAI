@@ -45,6 +45,7 @@ from .actions import Action, spec
 from .affordance import Affordance, Precondition, Role
 from .catalogue import KINDS
 from .interface import Environment
+from .layout import REQUIRED_KINDS, plan_kinds
 from .outcomes import Effect, Outcome, RemoteEffect
 from .types import Interaction, InteractionRecord, Observation, ObjectView, StepResult
 
@@ -53,11 +54,6 @@ REACH: float = 1.0
 
 #: Object kinds whose actuation opens a linked door.
 ACTUATORS: tuple[str, ...] = ("button", "lever", "valve", "plate", "switch")
-
-#: Kinds that must appear in every layout, so that the affordances the project
-#: is about are always reachable: a locked door, the plate that can open it,
-#: and the look-alike pair that decides whether the agent can.
-REQUIRED_KINDS: tuple[str, ...] = ("door", "plate", "block", "crate")
 
 
 @dataclass
@@ -115,11 +111,8 @@ class Warehouse(Environment):
         appearance_noise: float = appearance_mod.DEFAULT_NOISE,
         floor: tuple[float, float] = (12.0, 9.0),
     ) -> None:
-        if n_objects < len(REQUIRED_KINDS):
-            raise ValueError(
-                f"n_objects must be at least {len(REQUIRED_KINDS)} to fit the "
-                f"required kinds {REQUIRED_KINDS}"
-            )
+        # n_objects is validated by plan_kinds() during the first reset(),
+        # below -- see layout.py, which every backend shares.
         self._seed = seed
         # A layout_seed given explicitly pins the warehouse across episodes, so
         # dynamics can be varied against a constant world. Left unset, each
@@ -212,18 +205,7 @@ class Warehouse(Environment):
             else self._layout_seed + 104729 * self._episode
         )
         rng = np.random.default_rng(seed)
-        pool = [
-            k for k in catalogue.kinds(self._include_held_out)
-            if k not in ("door", "plate")
-        ]
-        chosen = list(REQUIRED_KINDS)
-        chosen.append(str(rng.choice(["button", "lever", "valve"])))
-        while len(chosen) < self._n_objects:
-            chosen.append(str(rng.choice(pool)))
-        # Shuffled so that neither an id nor its position in the layout
-        # correlates with kind: the required kinds would otherwise always
-        # occupy the first few slots.
-        rng.shuffle(chosen)
+        chosen = plan_kinds(rng, self._n_objects, self._include_held_out)
 
         # Ids are opaque. Naming them after their kind would hand the agent the
         # answer in a field it is allowed to read, and every metric would still
