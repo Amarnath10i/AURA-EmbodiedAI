@@ -28,3 +28,6 @@ files/EmbodiedAI_extracted/
 
 # External repos
 IsaacLab/
+
+# Isaac Lab venv
+.venv-isaac/
