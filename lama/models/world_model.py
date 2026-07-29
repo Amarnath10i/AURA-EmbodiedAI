@@ -6,21 +6,21 @@ Provides latent dynamics with calibrated uncertainty for imagination.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Tuple, List, Optional
+from typing import Tuple, Optional, Dict
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .env.types import Observation, Action
+from lama.env.types import Observation, Action
 
 
 @dataclass
 class RSSMState:
     """RSSM latent state."""
-    deter: torch.Tensor      # deterministic GRU state
-    stoch: torch.Tensor      # stochastic discrete latent (categorical)
-    logits: torch.Tensor     # logits for stochastic
+    deter: torch.Tensor      # deterministic GRU state [B, deter_dim]
+    stoch: torch.Tensor      # stochastic discrete latent [B, stoch_size] (flattened one-hot)
+    logits: torch.Tensor     # logits for stochastic [B, stoch_dim, stoch_classes]
 
     def get_features(self) -> torch.Tensor:
         """Concatenated features for decoder/predictor."""
@@ -42,10 +42,11 @@ class RSSM(nn.Module):
         self.deter_dim = deter_dim
         self.stoch_dim = stoch_dim
         self.stoch_classes = stoch_classes
+        self.stoch_size = stoch_dim * stoch_classes
 
         # GRU for deterministic path
         self.gru = nn.GRUCell(
-            stoch_dim + action_dim,
+            self.stoch_size + action_dim,
             deter_dim,
         )
 
@@ -53,37 +54,41 @@ class RSSM(nn.Module):
         self.prior = nn.Sequential(
             nn.Linear(deter_dim, hidden_dim),
             nn.ELU(),
-            nn.Linear(hidden_dim, stoch_dim * stoch_classes),
+            nn.Linear(hidden_dim, self.stoch_size),
         )
 
         # Posterior network: q(z_t | h_t, x_t)
         self.posterior = nn.Sequential(
-            nn.Linear(deter_dim + stoch_dim, hidden_dim),
+            nn.Linear(deter_dim + self.stoch_size, hidden_dim),
             nn.ELU(),
-            nn.Linear(hidden_dim, stoch_dim * stoch_classes),
+            nn.Linear(hidden_dim, self.stoch_size),
         )
 
         # Input encoder
         self.encoder = nn.Sequential(
             nn.Linear(64 + 128, hidden_dim),  # appearance + state
             nn.ELU(),
-            nn.Linear(hidden_dim, stoch_dim),
+            nn.Linear(hidden_dim, self.stoch_size),
         )
 
     def init_state(self, batch_size: int, device: torch.device) -> RSSMState:
         return RSSMState(
             deter=torch.zeros(batch_size, self.deter_dim, device=device),
-            stoch=torch.zeros(batch_size, self.stoch_dim, device=device),
+            stoch=torch.zeros(batch_size, self.stoch_size, device=device),
             logits=torch.zeros(batch_size, self.stoch_dim, self.stoch_classes, device=device),
         )
 
     def discrete_stochastic(self, logits: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Straight-through categorical sampling (Gumbel-Softmax)."""
-        # logits: [..., stoch_dim, stoch_classes]
-        shape = logits.shape
-        logits = logits.view(-1, self.stoch_classes)
-        stoch = F.gumbel_softmax(logits, tau=1.0, hard=True, dim=-1)
-        stoch = stoch.view(*shape[:-1], self.stoch_dim)
+        """Straight-through categorical sampling (Gumbel-Softmax).
+        logits: [B, stoch_dim, stoch_classes] or [B, stoch_size]
+        Returns: stoch [B, stoch_size] (flattened one-hot), logits [B, stoch_dim, stoch_classes]"""
+        if logits.dim() == 2:
+            logits = logits.view(-1, self.stoch_dim, self.stoch_classes)
+        
+        batch_shape = logits.shape[:-2]
+        logits_flat = logits.view(-1, self.stoch_classes)
+        stoch_flat = F.gumbel_softmax(logits_flat, tau=1.0, hard=True, dim=-1)
+        stoch = stoch_flat.view(*batch_shape, self.stoch_size)
         return stoch, logits
 
     def forward(
@@ -125,24 +130,34 @@ class RSSM(nn.Module):
         self,
         init_state: RSSMState,
         actions: torch.Tensor,  # [n_candidates, horizon, action_dim]
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Imagine trajectory for planning."""
+    ) -> torch.Tensor:
+        """Imagine trajectory for planning. Returns stochs [n, horizon, stoch_size]."""
         n_candidates, horizon, _ = actions.shape
-        device = actions.device
 
-        # Expand init state
-        state = RSSMState(
-            deter=init_state.deter.repeat(n_candidates, 1),
-            stoch=init_state.stoch.repeat(n_candidates, 1),
-            logits=init_state.logits.repeat(n_candidates, 1, 1),
-        )
+        # Expand init state only if needed
+        if init_state.deter.shape[0] == 1 and n_candidates > 1:
+            state = RSSMState(
+                deter=init_state.deter.repeat(n_candidates, 1),
+                stoch=init_state.stoch.repeat(n_candidates, 1),
+                logits=init_state.logits.repeat(n_candidates, 1, 1),
+            )
+        elif init_state.deter.shape[0] == n_candidates:
+            state = init_state
+        else:
+            # Mismatch - repeat init_state to match n_candidates
+            repeat_factor = n_candidates // init_state.deter.shape[0]
+            state = RSSMState(
+                deter=init_state.deter.repeat(repeat_factor, 1),
+                stoch=init_state.stoch.repeat(repeat_factor, 1),
+                logits=init_state.logits.repeat(repeat_factor, 1, 1),
+            )
 
         stochs = []
         for t in range(horizon):
             state = self.forward(state, actions[:, t])
             stochs.append(state.stoch)
 
-        stochs = torch.stack(stochs, dim=1)  # [n, horizon, stoch_dim]
+        stochs = torch.stack(stochs, dim=1)  # [n, horizon, stoch_size]
         return stochs
 
 
@@ -162,12 +177,12 @@ class WorldModel(nn.Module):
         self.rssm = RSSM(deter_dim, stoch_dim, stoch_classes, action_dim, hidden_dim)
         self.obs_dim = obs_dim
         self.action_dim = action_dim
-        self.stoch_dim = stoch_dim
+        self.stoch_size = self.rssm.stoch_size
         self.deter_dim = deter_dim
 
         # Observation decoder
         self.decoder = nn.Sequential(
-            nn.Linear(deter_dim + stoch_dim, hidden_dim),
+            nn.Linear(deter_dim + self.stoch_size, hidden_dim),
             nn.ELU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ELU(),
@@ -176,21 +191,21 @@ class WorldModel(nn.Module):
 
         # Reward predictor
         self.reward = nn.Sequential(
-            nn.Linear(deter_dim + stoch_dim, hidden_dim),
+            nn.Linear(deter_dim + self.stoch_size, hidden_dim),
             nn.ELU(),
             nn.Linear(hidden_dim, 1),
         )
 
         # Continue (discount) predictor
         self.continue_ = nn.Sequential(
-            nn.Linear(deter_dim + stoch_dim, hidden_dim),
+            nn.Linear(deter_dim + self.stoch_size, hidden_dim),
             nn.ELU(),
             nn.Linear(hidden_dim, 1),
         )
 
         # Value predictor
         self.value = nn.Sequential(
-            nn.Linear(deter_dim + stoch_dim, hidden_dim),
+            nn.Linear(deter_dim + self.stoch_size, hidden_dim),
             nn.ELU(),
             nn.Linear(hidden_dim, 1),
         )
@@ -200,7 +215,7 @@ class WorldModel(nn.Module):
         obs: torch.Tensor,
         actions: torch.Tensor,
         state: Optional[RSSMState] = None,
-    ) -> Tuple[RSSMState, dict]:
+    ) -> Tuple[RSSMState, Dict]:
         """Encode sequence, return final state and predictions."""
         batch, seq_len = actions.shape[:2]
         device = actions.device
@@ -245,20 +260,22 @@ class WorldModel(nn.Module):
         actions: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Imagine for planning."""
+        # Use RSSM's imagine_trajectory for proper state tracking
         stochs = self.rssm.imagine_trajectory(init_state, actions)
 
-        # Decode predictions
-        batch, horizon = stochs.shape[:2]
-        feats = []
+        # Re-run through GRU to get deter states for feature computation
+        batch, horizon = actions.shape[:2]
+        
+        deter_states = []
+        state = init_state
         for t in range(horizon):
-            deter = self.rssm.gru(
-                torch.cat([stochs[:, t], actions[:, t]], dim=-1),
-                init_state.deter if t == 0 else feats[-1][:, :self.deter_dim]
-            )
-            feat = torch.cat([deter, stochs[:, t]], dim=-1)
-            feats.append(feat)
-
-        feats = torch.stack(feats, dim=1)
+            state = self.rssm.forward(state, actions[:, t])
+            deter_states.append(state.deter)
+        
+        deter_states = torch.stack(deter_states, dim=1)  # [batch, horizon, deter_dim]
+        
+        # Combine features
+        feats = torch.cat([deter_states, stochs], dim=-1)
         rewards = self.reward(feats).squeeze(-1)
         values = self.value(feats).squeeze(-1)
         continues = torch.sigmoid(self.continue_(feats)).squeeze(-1)
@@ -273,7 +290,7 @@ class WorldModel(nn.Module):
         continues: torch.Tensor,
         state: Optional[RSSMState] = None,
         kl_weight: float = 1.0,
-    ) -> Tuple[torch.Tensor, dict]:
+    ) -> Tuple[torch.Tensor, Dict]:
         """World model loss: reconstruction + reward + continue + KL."""
         final_state, outputs = self.forward(obs, actions, state)
 
