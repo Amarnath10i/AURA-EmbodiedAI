@@ -1,0 +1,430 @@
+{
+  "layout": {
+    "backend": "numpy-warehouse",
+    "objects": 8,
+    "kinds": [
+      "block",
+      "button",
+      "crate",
+      "door",
+      "pallet",
+      "plate",
+      "toolbox",
+      "valve"
+    ],
+    "reachable_affordances": 26,
+    "by_role": {
+      "primary": 13,
+      "secondary": 6,
+      "incidental": 7
+    }
+  },
+  "episodes": [
+    {
+      "episode": 0,
+      "steps": 71,
+      "tested": 67,
+      "approached": 4,
+      "budget_left": 0.19999999999998141
+    },
+    {
+      "episode": 1,
+      "steps": 65,
+      "tested": 61,
+      "approached": 4,
+      "budget_left": 0.10000000000005471
+    },
+    {
+      "episode": 2,
+      "steps": 65,
+      "tested": 64,
+      "approached": 1,
+      "budget_left": 0.19999999999995421
+    },
+    {
+      "episode": 3,
+      "steps": 71,
+      "tested": 65,
+      "approached": 6,
+      "budget_left": 0.10000000000003761
+    },
+    {
+      "episode": 4,
+      "steps": 72,
+      "tested": 66,
+      "approached": 6,
+      "budget_left": 0.0999999999999664
+    },
+    {
+      "episode": 5,
+      "steps": 69,
+      "tested": 67,
+      "approached": 2,
+      "budget_left": 0.09999999999997916
+    },
+    {
+      "episode": 6,
+      "steps": 60,
+      "tested": 56,
+      "approached": 4,
+      "budget_left": 0.10000000000005116
+    },
+    {
+      "episode": 7,
+      "steps": 71,
+      "tested": 67,
+      "approached": 4,
+      "budget_left": 0.19999999999998141
+    },
+    {
+      "episode": 8,
+      "steps": 67,
+      "tested": 62,
+      "approached": 5,
+      "budget_left": 0.09999999999995951
+    },
+    {
+      "episode": 9,
+      "steps": 70,
+      "tested": 66,
+      "approached": 4,
+      "budget_left": 0.19999999999999185
+    },
+    {
+      "episode": 10,
+      "steps": 68,
+      "tested": 63,
+      "approached": 5,
+      "budget_left": 0.19999999999995433
+    },
+    {
+      "episode": 11,
+      "steps": 67,
+      "tested": 61,
+      "approached": 6,
+      "budget_left": 0.19999999999997986
+    },
+    {
+      "episode": 12,
+      "steps": 59,
+      "tested": 55,
+      "approached": 4,
+      "budget_left": 0.19999999999998552
+    },
+    {
+      "episode": 13,
+      "steps": 89,
+      "tested": 37,
+      "approached": 52,
+      "budget_left": 0.09999999999998216
+    },
+    {
+      "episode": 14,
+      "steps": 65,
+      "tested": 62,
+      "approached": 3,
+      "budget_left": 0.09999999999996134
+    },
+    {
+      "episode": 15,
+      "steps": 69,
+      "tested": 60,
+      "approached": 9,
+      "budget_left": 0.10000000000003706
+    },
+    {
+      "episode": 16,
+      "steps": 58,
+      "tested": 50,
+      "approached": 8,
+      "budget_left": 0.09999999999995512
+    },
+    {
+      "episode": 17,
+      "steps": 59,
+      "tested": 47,
+      "approached": 12,
+      "budget_left": 0.09999999999997994
+    },
+    {
+      "episode": 18,
+      "steps": 65,
+      "tested": 61,
+      "approached": 4,
+      "budget_left": 0.09999999999996861
+    },
+    {
+      "episode": 19,
+      "steps": 50,
+      "tested": 46,
+      "approached": 4,
+      "budget_left": 0.09999999999998366
+    },
+    {
+      "episode": 20,
+      "steps": 57,
+      "tested": 51,
+      "approached": 6,
+      "budget_left": 0.09999999999998865
+    },
+    {
+      "episode": 21,
+      "steps": 69,
+      "tested": 58,
+      "approached": 11,
+      "budget_left": 0.10000000000004283
+    },
+    {
+      "episode": 22,
+      "steps": 68,
+      "tested": 61,
+      "approached": 7,
+      "budget_left": 0.19999999999993567
+    },
+    {
+      "episode": 23,
+      "steps": 70,
+      "tested": 65,
+      "approached": 5,
+      "budget_left": 0.19999999999992568
+    },
+    {
+      "episode": 24,
+      "steps": 69,
+      "tested": 64,
+      "approached": 5,
+      "budget_left": 0.19999999999994256
+    },
+    {
+      "episode": 25,
+      "steps": 73,
+      "tested": 69,
+      "approached": 4,
+      "budget_left": 0.1999999999999612
+    },
+    {
+      "episode": 26,
+      "steps": 65,
+      "tested": 61,
+      "approached": 4,
+      "budget_left": 0.09999999999994957
+    },
+    {
+      "episode": 27,
+      "steps": 65,
+      "tested": 60,
+      "approached": 5,
+      "budget_left": 0.09999999999993309
+    },
+    {
+      "episode": 28,
+      "steps": 64,
+      "tested": 57,
+      "approached": 7,
+      "budget_left": 0.19999999999996498
+    },
+    {
+      "episode": 29,
+      "steps": 51,
+      "tested": 47,
+      "approached": 4,
+      "budget_left": 0.10000000000000142
+    },
+    {
+      "episode": 30,
+      "steps": 75,
+      "tested": 67,
+      "approached": 8,
+      "budget_left": 0.099999999999968
+    },
+    {
+      "episode": 31,
+      "steps": 134,
+      "tested": 49,
+      "approached": 85,
+      "budget_left": 0.1999999999999268
+    },
+    {
+      "episode": 32,
+      "steps": 70,
+      "tested": 62,
+      "approached": 8,
+      "budget_left": 0.09999999999994758
+    },
+    {
+      "episode": 33,
+      "steps": 399,
+      "tested": 0,
+      "approached": 399,
+      "budget_left": 0.199999999999401
+    },
+    {
+      "episode": 34,
+      "steps": 399,
+      "tested": 0,
+      "approached": 399,
+      "budget_left": 0.199999999999401
+    },
+    {
+      "episode": 35,
+      "steps": 55,
+      "tested": 43,
+      "approached": 12,
+      "budget_left": 0.0999999999999866
+    },
+    {
+      "episode": 36,
+      "steps": 399,
+      "tested": 0,
+      "approached": 399,
+      "budget_left": 0.199999999999401
+    },
+    {
+      "episode": 37,
+      "steps": 68,
+      "tested": 64,
+      "approached": 4,
+      "budget_left": 0.0999999999999775
+    },
+    {
+      "episode": 38,
+      "steps": 399,
+      "tested": 0,
+      "approached": 399,
+      "budget_left": 0.199999999999401
+    },
+    {
+      "episode": 39,
+      "steps": 71,
+      "tested": 67,
+      "approached": 4,
+      "budget_left": 0.19999999999998141
+    },
+    {
+      "episode": 40,
+      "steps": 56,
+      "tested": 46,
+      "approached": 10,
+      "budget_left": 0.19999999999999896
+    },
+    {
+      "episode": 41,
+      "steps": 63,
+      "tested": 59,
+      "approached": 4,
+      "budget_left": 0.19999999999995788
+    },
+    {
+      "episode": 42,
+      "steps": 399,
+      "tested": 0,
+      "approached": 399,
+      "budget_left": 0.199999999999401
+    },
+    {
+      "episode": 43,
+      "steps": 53,
+      "tested": 41,
+      "approached": 12,
+      "budget_left": 0.09999999999998949
+    },
+    {
+      "episode": 44,
+      "steps": 65,
+      "tested": 64,
+      "approached": 1,
+      "budget_left": 0.09999999999997877
+    },
+    {
+      "episode": 45,
+      "steps": 399,
+      "tested": 0,
+      "approached": 399,
+      "budget_left": 0.199999999999401
+    },
+    {
+      "episode": 46,
+      "steps": 399,
+      "tested": 0,
+      "approached": 399,
+      "budget_left": 0.199999999999401
+    },
+    {
+      "episode": 47,
+      "steps": 399,
+      "tested": 0,
+      "approached": 399,
+      "budget_left": 0.199999999999401
+    },
+    {
+      "episode": 48,
+      "steps": 399,
+      "tested": 0,
+      "approached": 399,
+      "budget_left": 0.199999999999401
+    },
+    {
+      "episode": 49,
+      "steps": 399,
+      "tested": 0,
+      "approached": 399,
+      "budget_left": 0.199999999999401
+    }
+  ],
+  "concepts": 16,
+  "beliefs": 158,
+  "confirmed": 11,
+  "refuted": 52,
+  "ledger_entries": 2338,
+  "total_budget": 3123.7999999999574,
+  "secondary_affordances": [
+    {
+      "concept": 6,
+      "action": "PRESS",
+      "tool": "None",
+      "n": 8,
+      "mean": 0.9,
+      "remote_rate": 0.9
+    },
+    {
+      "concept": 8,
+      "action": "ROTATE",
+      "tool": "None",
+      "n": 8,
+      "mean": 0.9,
+      "remote_rate": 0.9
+    },
+    {
+      "concept": 12,
+      "action": "PRESS",
+      "tool": "None",
+      "n": 8,
+      "mean": 0.9,
+      "remote_rate": 0.9
+    },
+    {
+      "concept": 5,
+      "action": "PULL",
+      "tool": "None",
+      "n": 8,
+      "mean": 0.9,
+      "remote_rate": 0.9
+    },
+    {
+      "concept": 5,
+      "action": "ROTATE",
+      "tool": "None",
+      "n": 38,
+      "mean": 0.6,
+      "remote_rate": 0.96
+    },
+    {
+      "concept": 12,
+      "action": "PUSH",
+      "tool": "None",
+      "n": 40,
+      "mean": 0.47619047619047616,
+      "remote_rate": 0.9523809523809523
+    }
+  ]
+}
