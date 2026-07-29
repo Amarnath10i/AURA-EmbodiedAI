@@ -247,6 +247,8 @@ class IsaacWarehouse(Environment):
 
         import torch
 
+        self._sim.reset()
+
         for obj in self._objects.values():
             pose = torch.tensor(
                 obj.initial_pose, dtype=torch.float32, device=self._sim.device
@@ -255,6 +257,7 @@ class IsaacWarehouse(Environment):
             obj.body.write_root_velocity_to_sim(
                 torch.zeros((1, 6), dtype=torch.float32, device=self._sim.device)
             )
+            obj.body.write_data_to_sim()
             obj.is_open = False
             obj.locked = obj.kind == "door"
             obj.latched = False
@@ -264,7 +267,6 @@ class IsaacWarehouse(Environment):
 
         self._agent_pos = self._rng.uniform(0.1, 0.9, size=2) * self._floor
         self._agent_heading = float(self._rng.uniform(-np.pi, np.pi))
-        self._sim.reset()
 
         return self._observe()
 
