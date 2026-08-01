@@ -143,6 +143,25 @@ class ConceptCodebook:
         )
         return concept_id
 
+    def split_concept(self, concept_id: int) -> tuple[int, int]:
+        """Split a concept into two sub-concepts, separating their means slightly."""
+        old_c = self._concepts[concept_id]
+        
+        perturb = np.random.normal(0, 1e-4, size=APPEARANCE_DIM).astype(np.float32)
+        mean_a = old_c.mean + perturb
+        mean_b = old_c.mean - perturb
+        
+        id_a = len(self._concepts)
+        self._concepts.append(Concept(id_a, mean_a, max(1, old_c.count // 2), old_c.first_seen))
+        
+        id_b = len(self._concepts)
+        self._concepts.append(Concept(id_b, mean_b, max(1, old_c.count // 2), old_c.first_seen))
+        
+        # Mark old concept as invalid by moving it far away
+        old_c.mean = np.full_like(old_c.mean, np.inf)
+        
+        return id_a, id_b
+
     def __len__(self) -> int:
         return len(self._concepts)
 

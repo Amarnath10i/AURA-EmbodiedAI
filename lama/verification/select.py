@@ -41,10 +41,18 @@ def uncertainty(hypothesis: Hypothesis) -> float:
     return hypothesis.credible_width
 
 
+from ..env.outcomes import IRREVERSIBLE_EFFECTS
+
 def score(hypothesis: Hypothesis) -> float:
     """Expected information gained per unit of budget spent testing this."""
     u = uncertainty(hypothesis)
-    return u / hypothesis.cost if u > 0.0 else 0.0
+    
+    # Hard-gate: prevent selection of irreversible actions if uncertainty is too high
+    if hypothesis.dominant_effect in IRREVERSIBLE_EFFECTS and u > 0.5:
+        return 0.0
+        
+    base_score = u / hypothesis.cost if u > 0.0 else 0.0
+    return base_score + hypothesis.relevance + hypothesis.info_gain
 
 
 def rank(hypotheses: Iterable[Hypothesis]) -> tuple[Hypothesis, ...]:

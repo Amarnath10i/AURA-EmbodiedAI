@@ -64,6 +64,17 @@ class ObjectView:
                 f"got {self.appearance.shape}"
             )
 
+@dataclass(frozen=True, eq=False)
+class CompositeObject(ObjectView):
+    """A combination of two objects treated as a single entity."""
+    part_a_id: str = ""
+    part_b_id: str = ""
+    relation: str = "on"
+    
+    @property
+    def identity(self) -> tuple[str, str, str]:
+        return (self.part_a_id, self.part_b_id, self.relation)
+
 
 @dataclass(frozen=True, eq=False)
 class Observation:

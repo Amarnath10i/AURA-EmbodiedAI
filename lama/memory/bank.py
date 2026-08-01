@@ -34,7 +34,10 @@ and should cost more evidence.
 
 from __future__ import annotations
 
+import json
 import math
+import os
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum, auto
@@ -49,6 +52,7 @@ class Status(Enum):
     PROVISIONAL = auto()  # attempted, but not enough evidence to settle
     CONFIRMED = auto()    # confident this is a real, working affordance
     REFUTED = auto()      # confident this does not work
+    STUCK = auto()        # irreducible ambiguity (e.g. missing sensing channel)
 
 
 #: Posterior mass below which the bank calls an affordance not real.
@@ -68,7 +72,7 @@ _EVIDENCE_CAP: int = 20
 
 #: Statuses that count as "settled" for deciding whether a status change is a
 #: `Revision` worth reporting, as opposed to routine evidence accumulation.
-_SETTLED = frozenset({Status.CONFIRMED, Status.REFUTED})
+_SETTLED = frozenset({Status.CONFIRMED, Status.REFUTED, Status.STUCK})
 
 
 @dataclass(frozen=True)
@@ -80,6 +84,7 @@ class Evidence:
     object_id: str
     tool_id: str | None
     effect: Effect
+    force_required: float = 0.0
 
 
 @dataclass
@@ -107,6 +112,7 @@ class Belief:
     remote_alpha: float = 1.0
     remote_beta: float = 1.0
     evidence: deque = field(default_factory=lambda: deque(maxlen=_EVIDENCE_CAP))
+    interval_history: deque = field(default_factory=lambda: deque(maxlen=10))
     total_attempts: int = 0
 
     @property
@@ -142,6 +148,18 @@ class Belief:
         return max(self.effect_counts, key=self.effect_counts.get)
 
     @property
+    def operator(self) -> dict | None:
+        """STRIPS-style operator if confirmed."""
+        if not self.is_confirmed:
+            return None
+        return {
+            "precondition": ["reachable(target)"],
+            "action": (self.key[1].name, "target", "tool" if self.key[2] is not None else None),
+            "effect": {"state": self.dominant_effect.name if self.dominant_effect else "UNKNOWN"},
+            "confidence": {"alpha": self.alpha, "beta": self.beta}
+        }
+
+    @property
     def status(self) -> Status:
         if self.total_attempts == 0:
             return Status.UNTESTED
@@ -150,6 +168,16 @@ class Belief:
             return Status.REFUTED
         if lo > REAL_EPS and (hi - lo) <= MAX_SETTLED_WIDTH:
             return Status.CONFIRMED
+        
+        # Plateau detector
+        if len(self.interval_history) == self.interval_history.maxlen:
+            oldest = self.interval_history[0]
+            newest = self.interval_history[-1]
+            if oldest > 0:
+                rel_reduction = (oldest - newest) / oldest
+                if rel_reduction < 0.05 and lo > REAL_EPS and hi > REAL_EPS:
+                    return Status.STUCK
+                    
         return Status.PROVISIONAL
 
     @property
@@ -179,6 +207,8 @@ class AffordanceBank:
 
     def __init__(self) -> None:
         self._beliefs: dict[tuple[int, Action, int | None], Belief] = {}
+        os.makedirs("outputs", exist_ok=True)
+        self._log_file = "outputs/bank_history.jsonl"
 
     def observe(
         self,
@@ -216,10 +246,28 @@ class AffordanceBank:
             belief.beta += 1.0
         belief.total_attempts += 1
         belief.evidence.append(
-            Evidence(episode, t, object_id, tool_id, outcome.effect)
+            Evidence(episode, t, object_id, tool_id, outcome.effect, outcome.force_required)
         )
+        lo, hi = belief.credible_interval
+        belief.interval_history.append(hi - lo)
 
         new_status = belief.status
+        
+        self.check_recalibration()
+        
+        # Logging hook
+        lo, hi = belief.credible_interval
+        log_entry = {
+            "key": (key[0], key[1].name, key[2]),
+            "mean": belief.mean,
+            "credible_interval": (lo, hi),
+            "status": new_status.name,
+            "total_attempts": belief.total_attempts,
+            "timestamp": time.time(),
+        }
+        with open(self._log_file, "a") as f:
+            f.write(json.dumps(log_entry) + "\n")
+
         if new_status == old_status:
             return None
         if old_status not in _SETTLED and new_status not in _SETTLED:
@@ -228,6 +276,39 @@ class AffordanceBank:
 
     def belief(self, key: tuple[int, Action, int | None]) -> Belief | None:
         return self._beliefs.get(key)
+
+    def beliefs_for_concept(self, concept_id: int) -> tuple[Belief, ...]:
+        return tuple(b for b in self._beliefs.values() if b.key[0] == concept_id)
+
+    def derive_composite_belief(
+        self, composite_concept: int, part_a_concept: int, part_b_concept: int,
+        action: Action, tool_concept: int | None
+    ) -> Belief:
+        """Derive a starting belief for a composite object from its parts."""
+        key = (composite_concept, action, tool_concept)
+        if key in self._beliefs:
+            return self._beliefs[key]
+            
+        b_a = self._beliefs.get((part_a_concept, action, tool_concept))
+        b_b = self._beliefs.get((part_b_concept, action, tool_concept))
+        
+        alpha = 1.0
+        beta = 1.0
+        
+        if b_a and b_b:
+            mean = (b_a.mean + b_b.mean) / 2.0
+            alpha = max(1.0, mean * 2.0)
+            beta = max(1.0, (1.0 - mean) * 2.0)
+        elif b_a:
+            alpha = max(1.0, b_a.mean * 2.0)
+            beta = max(1.0, (1.0 - b_a.mean) * 2.0)
+        elif b_b:
+            alpha = max(1.0, b_b.mean * 2.0)
+            beta = max(1.0, (1.0 - b_b.mean) * 2.0)
+            
+        b_composite = Belief(key=key, alpha=alpha, beta=beta)
+        self._beliefs[key] = b_composite
+        return b_composite
 
     def beliefs(self) -> tuple[Belief, ...]:
         """Every belief the bank holds, at any status.
@@ -252,3 +333,19 @@ class AffordanceBank:
 
     def __len__(self) -> int:
         return len(self._beliefs)
+
+    def check_recalibration(self) -> None:
+        """Trigger recalibrate if average credible width of provisional beliefs stays stuck."""
+        provisional_beliefs = [b for b in self._beliefs.values() if b.status == Status.PROVISIONAL]
+        if len(provisional_beliefs) > 5:
+            avg_width = sum((b.credible_interval[1] - b.credible_interval[0]) for b in provisional_beliefs) / len(provisional_beliefs)
+            if avg_width > 0.4:
+                self.recalibrate()
+                
+    def recalibrate(self) -> None:
+        """Reset or loosen priors for stuck/provisional beliefs to encourage re-exploration."""
+        for b in self._beliefs.values():
+            if b.status in (Status.PROVISIONAL, Status.STUCK):
+                # Loosen the prior by pulling it back towards 1,1
+                b.alpha = (b.alpha + 1.0) / 2.0
+                b.beta = (b.beta + 1.0) / 2.0

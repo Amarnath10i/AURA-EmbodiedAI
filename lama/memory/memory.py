@@ -75,8 +75,29 @@ class AffordanceMemory:
             outcome=record.outcome, cost=record.cost,
             object_id=interaction.target, tool_id=record.tool_id,
         )
-        return self.bank.observe(
+        from .bank import Status, Belief
+        
+        revision = self.bank.observe(
             target_concept, interaction.action, tool_concept, record.outcome,
             episode=record.episode, t=record.t,
             object_id=interaction.target, tool_id=record.tool_id,
         )
+        
+        if revision and revision.new_status == Status.STUCK:
+            belief = self.bank.belief(revision.key)
+            if belief:
+                forces = [ev.force_required for ev in belief.evidence]
+                if len(forces) >= 2:
+                    mean_f = sum(forces) / len(forces)
+                    var_f = sum((f - mean_f)**2 for f in forces) / len(forces)
+                    std_f = var_f ** 0.5
+                    if std_f > 0.1:  # Significant variance indicates two populations
+                        id_a, id_b = self.concepts.split_concept(target_concept)
+                        # Re-open the belief as PROVISIONAL under the new concepts
+                        for new_id in (id_a, id_b):
+                            new_key = (new_id, interaction.action, tool_concept)
+                            self.bank._beliefs[new_key] = Belief(
+                                key=new_key, alpha=1.5, beta=1.5, total_attempts=2
+                            )
+                            
+        return revision

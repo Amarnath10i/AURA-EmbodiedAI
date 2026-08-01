@@ -8,6 +8,8 @@ import torch.nn.functional as F
 from dataclasses import dataclass
 from typing import Callable, Optional
 from lama.world_model.rssm import WorldModel, RSSMState
+from lama.memory.bank import AffordanceBank
+from collections import deque
 
 
 @dataclass
@@ -166,5 +168,53 @@ def make_planner(
         return CEMPlanner(world_model, **kwargs)
     elif planner_type == "mppi":
         return MPPIPlanner(world_model, **kwargs)
+    elif planner_type == "regression":
+        return RegressionPlanner(kwargs.get("bank"))
     else:
         raise ValueError(f"Unknown planner: {planner_type}")
+
+class RegressionPlanner:
+    """Symbolic backward-chaining regression planner over confirmed operators."""
+    
+    def __init__(self, bank: AffordanceBank):
+        self.bank = bank
+        
+    def plan(self, goal_predicate: str, max_depth: int = 5) -> list[dict] | None:
+        """
+        Search backward from goal_predicate.
+        Returns a sequence of operators to achieve the goal, or None if no plan found.
+        """
+        # Get all confirmed operators
+        operators = [b.operator for b in self.bank.confirmed() if b.operator is not None]
+        
+        # Simple BFS regression search
+        # Queue stores tuples of (current_goals, plan_so_far)
+        queue = deque([({goal_predicate}, [])])
+        visited = set()
+        
+        while queue:
+            current_goals, plan = queue.popleft()
+            
+            # If no unsatisfied goals, plan is complete
+            if not current_goals:
+                return plan
+                
+            goals_tuple = frozenset(current_goals)
+            if goals_tuple in visited or len(plan) >= max_depth:
+                continue
+            visited.add(goals_tuple)
+            
+            # Pick a goal to resolve (for simplicity, we just take one)
+            goal = next(iter(current_goals))
+            remaining_goals = current_goals - {goal}
+            
+            # Find operators whose effect matches the goal
+            for op in operators:
+                effect_state = op["effect"].get("state")
+                if effect_state == goal:
+                    # New subgoals are the preconditions of this operator
+                    new_goals = remaining_goals.union(set(op["precondition"]))
+                    new_plan = [op] + plan
+                    queue.append((new_goals, new_plan))
+                    
+        return None

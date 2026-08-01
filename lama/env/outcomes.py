@@ -81,6 +81,7 @@ class Outcome:
     displacement: float = 0.0        # metres moved across the support
     height_gain: float = 0.0         # metres raised clear of the support
     rotation: float = 0.0            # radians turned about the vertical axis
+    force_required: float = 0.0      # continuous resistance/force observed
     remote: tuple[RemoteEffect, ...] = field(default_factory=tuple)
     irreversible: bool = False
 

@@ -59,9 +59,11 @@ class ActiveExplorer(nn.Module):
         # Get all beliefs for this concept
         total_uncertainty = 0.0
         count = 0
+        from ..memory.bank import _SETTLED
         for belief in self.memory.bank.beliefs_for_concept(concept_id):
-            if not belief.is_settled():
-                total_uncertainty += belief.credible_width()
+            if belief.status not in _SETTLED:
+                lo, hi = belief.credible_interval
+                total_uncertainty += (hi - lo)
                 count += 1
 
         if count == 0:
@@ -127,9 +129,10 @@ class FrontierExplorer(nn.Module):
                 frontiers.append((obj, 1.0))  # completely unknown
             else:
                 # Check if concept has unsettled beliefs
+                from ..memory.bank import _SETTLED
                 unsettled = sum(
                     1 for b in self.memory.bank.beliefs_for_concept(concept_id)
-                    if not b.is_settled()
+                    if b.status not in _SETTLED
                 )
                 if unsettled > 0:
                     frontiers.append((obj, min(1.0, unsettled / 5.0)))

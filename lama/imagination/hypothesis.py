@@ -74,7 +74,10 @@ class Hypothesis:
     predicted_mean: float | None
     credible_width: float | None
     dominant_effect: Effect | None
+    predicted_effect: dict | None
     cost: float
+    relevance: float = 0.0
+    info_gain: float = 0.0
 
     @property
     def is_relational(self) -> bool:
@@ -99,6 +102,19 @@ def imagine(
     tool_concept = (
         memory.concepts.peek(tool_view.appearance) if tool_view is not None else None
     )
+    
+    from ..memory.bank import _SETTLED
+    def compute_concept_info_gain(concept_id: int | None) -> float:
+        if concept_id is None:
+            return 1.0
+        total_uncertainty = 0.0
+        count = 0
+        for b in memory.bank.beliefs_for_concept(concept_id):
+            if b.status not in _SETTLED:
+                lo, hi = b.credible_interval
+                total_uncertainty += (hi - lo)
+                count += 1
+        return (total_uncertainty / count) if count > 0 else 0.0
 
     hypotheses: list[Hypothesis] = []
     for target in observation.reachable():
@@ -133,7 +149,66 @@ def imagine(
                     dominant_effect=(
                         belief.dominant_effect if belief is not None else None
                     ),
+                    predicted_effect=(
+                        belief.operator if belief is not None else None
+                    ),
                     cost=s.cost,
+                    info_gain=compute_concept_info_gain(target_concept),
                 )
             )
+    import numpy as np
+    
+    def is_known(concept_id):
+        if concept_id is None: return False
+        for b in memory.bank.beliefs_for_concept(concept_id):
+            if b.status in (Status.PROVISIONAL, Status.CONFIRMED, Status.REFUTED, Status.STUCK):
+                return True
+        return False
+
+    reachable_objs = observation.reachable()
+    for i, target_a in enumerate(reachable_objs):
+        if target_a.held: continue
+        concept_a = memory.concepts.peek(target_a.appearance)
+        
+        for j, target_b in enumerate(reachable_objs):
+            if i == j or target_b.held: continue
+            dist_ab = float(np.linalg.norm(target_a.position - target_b.position))
+            if dist_ab > 0.5:
+                continue
+                
+            concept_b = memory.concepts.peek(target_b.appearance)
+            if not (is_known(concept_a) and is_known(concept_b)):
+                continue
+                
+            composite_concept = hash((concept_a, concept_b)) % 100000
+            
+            for action in HYPOTHESIS_ACTIONS:
+                s = spec(action)
+                if s.needs_free_gripper and holding is not None: continue
+                if s.needs_held_object and holding is None: continue
+                
+                this_tool_id = holding if s.relational else None
+                this_tool_concept = tool_concept if s.relational else None
+                
+                belief = memory.bank.derive_composite_belief(
+                    composite_concept, concept_a, concept_b, action, this_tool_concept
+                )
+                
+                lo_hi = belief.credible_interval if belief is not None else None
+                hypotheses.append(
+                    Hypothesis(
+                        target_id=f"{target_a.object_id}_{target_b.object_id}",
+                        action=action,
+                        tool_id=this_tool_id,
+                        target_concept=composite_concept,
+                        tool_concept=this_tool_concept,
+                        status=belief.status if belief is not None else Status.UNTESTED,
+                        predicted_mean=belief.mean if belief is not None else None,
+                        credible_width=(lo_hi[1] - lo_hi[0]) if lo_hi is not None else None,
+                        dominant_effect=belief.dominant_effect if belief is not None else None,
+                        predicted_effect=belief.operator if belief is not None else None,
+                        cost=s.cost,
+                    )
+                )
+                
     return tuple(hypotheses)
