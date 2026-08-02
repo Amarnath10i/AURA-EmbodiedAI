@@ -161,3 +161,43 @@ def test_running_mean_converges_toward_the_true_prototype():
         cid = cb.assign(a, 0, t)
     error_5000 = float(np.linalg.norm(cb.concept(cid).mean - prototype("toolbox")))
     assert error_5000 < error_500 + 0.02, "should not keep drifting further"
+
+
+# --------------------------------------------------------------------------- #
+# split_concept: generation tracking
+# --------------------------------------------------------------------------- #
+def test_a_freshly_merged_concept_is_generation_zero():
+    cb = ConceptCodebook()
+    rng = np.random.default_rng(0)
+    cid = cb.assign(describe(KINDS["cup"], rng), 0, 0)
+    assert cb.concept(cid).generation == 0
+
+
+def test_split_children_are_one_generation_above_the_parent():
+    cb = ConceptCodebook()
+    rng = np.random.default_rng(1)
+    merged = None
+    for t in range(10):
+        merged = cb.assign(describe(KINDS["lever"], rng), 0, t)
+        cb.assign(describe(KINDS["switch"], rng), 0, t)
+    assert cb.concept(merged).generation == 0
+    id_a, id_b = cb.split_concept(merged)
+    assert cb.concept(id_a).generation == 1
+    assert cb.concept(id_b).generation == 1
+
+
+def test_splitting_a_child_produces_generation_two():
+    """Splitting is unconditional in ConceptCodebook itself -- capping repeat
+    splits is AffordanceMemory's policy (test_memory_facade.py), not this
+    class's. This just confirms generation keeps counting correctly if asked
+    to split repeatedly, so that policy has an accurate number to act on."""
+    cb = ConceptCodebook()
+    rng = np.random.default_rng(2)
+    merged = None
+    for t in range(10):
+        merged = cb.assign(describe(KINDS["crate"], rng), 0, t)
+        cb.assign(describe(KINDS["block"], rng), 0, t)
+    id_a, _ = cb.split_concept(merged)
+    grandchild_a, grandchild_b = cb.split_concept(id_a)
+    assert cb.concept(grandchild_a).generation == 2
+    assert cb.concept(grandchild_b).generation == 2

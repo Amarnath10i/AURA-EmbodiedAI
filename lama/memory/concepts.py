@@ -86,6 +86,11 @@ class Concept:
         count: Number of observations merged.
         first_seen: `(episode, t)` of the observation that created it.
         recent: A bounded sample of raw observations, for `split_concept`.
+        generation: 0 for a concept formed by ordinary merging; N+1 for a
+            concept produced by splitting a generation-N concept. Lets a
+            caller (`AffordanceMemory`) cap how many times one appearance
+            lineage may be re-split -- see `split_concept`'s docstring for
+            why that cap matters.
     """
 
     concept_id: int
@@ -93,6 +98,7 @@ class Concept:
     count: int
     first_seen: tuple[int, int]
     recent: deque = field(default_factory=lambda: deque(maxlen=_RECENT_CAP))
+    generation: int = 0
 
 
 class ConceptCodebook:
@@ -171,18 +177,35 @@ class ConceptCodebook:
         beliefs (`memory.py`) lets the two halves accumulate independent
         evidence going forward, even though which physical object lands in
         which half is then arbitrary.
+
+        Unconditional here: this method always performs the split it is
+        asked for. Deciding whether to CALL it again on an already-split
+        lineage is the caller's job (`AffordanceMemory`), specifically
+        because this method cannot itself distinguish "this split just
+        genuinely didn't have a signal to find" from "this split worked".
+        Measured directly: the appearance-projection spread for crate/block
+        (no true separation) and lever/switch (true ~0.10 separation) comes
+        out nearly identical -- 0.078 vs 0.079 in a 30-trial check -- because
+        a small real gap does not visibly widen a noisy spread by much. There
+        is no cheap signal in this method's own data to gate on. The `Concept.
+        generation` field is what the caller uses instead, to bound repeat
+        splitting rather than try to distinguish a good split from a
+        pointless one in advance.
         """
         old_c = self._concepts[concept_id]
         direction, scale = self._separating_direction(old_c)
         offset = direction * scale
+        next_gen = old_c.generation + 1
 
         id_a = len(self._concepts)
         self._concepts.append(
-            Concept(id_a, old_c.mean + offset, max(1, old_c.count // 2), old_c.first_seen)
+            Concept(id_a, old_c.mean + offset, max(1, old_c.count // 2),
+                    old_c.first_seen, generation=next_gen)
         )
         id_b = len(self._concepts)
         self._concepts.append(
-            Concept(id_b, old_c.mean - offset, max(1, old_c.count // 2), old_c.first_seen)
+            Concept(id_b, old_c.mean - offset, max(1, old_c.count // 2),
+                    old_c.first_seen, generation=next_gen)
         )
 
         # Retire the old concept rather than removing it, so existing ids

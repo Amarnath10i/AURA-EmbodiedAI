@@ -217,3 +217,40 @@ def test_crate_and_block_blend_into_one_belief_end_to_end():
         "but only the block half opens the door, and the concept cannot "
         "tell which half it is holding"
     )
+
+
+def test_repeated_crate_block_encounters_do_not_cascade_split_forever():
+    """Regression test for a real bug found by running the system for 150
+    episodes (docs/DECISIONS.md): because crate and block are appearance-
+    identical, splitting can never actually separate them, so every fresh
+    STUCK verdict on a new episode's crate/block instances re-split an
+    already-split descendant -- 27 STUCK beliefs and 73 concepts from what
+    should have been about a dozen, with the same seed that this test now
+    pins down to a bounded number.
+
+    Pushes crate and block, alternating, across many episodes on one
+    persistent memory -- enough to trigger STUCK/split more than once if
+    nothing were capping it -- and checks the cap actually holds."""
+    from lama.env.warehouse import WarehouseOracle
+    from lama.memory.memory import MAX_SPLIT_GENERATIONS
+
+    mem = AffordanceMemory()
+    for ep in range(40):
+        w = Warehouse(seed=ep, layout_seed=1, budget=60.0)
+        oracle = WarehouseOracle(w)
+        target = oracle.ids_of_kind("crate" if ep % 2 == 0 else "block")[0]
+        before = w.reset()
+        before = w.step(Interaction(Action.APPROACH, target)).observation
+        step = w.step(Interaction(Action.PUSH, target))
+        mem.observe(before, step.record)
+
+    retired = sum(
+        1 for c in mem.concepts.concepts() if float(c.mean[0]) == float("inf")
+    )
+    assert retired <= 1, (
+        f"expected at most one crate/block split (generation cap = "
+        f"{MAX_SPLIT_GENERATIONS}), got {retired} retired concepts -- the "
+        f"cascade regression is back"
+    )
+    max_generation = max(c.generation for c in mem.concepts.concepts())
+    assert max_generation <= MAX_SPLIT_GENERATIONS

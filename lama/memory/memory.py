@@ -14,6 +14,22 @@ from .bank import AffordanceBank, Revision, Status
 from .concepts import ConceptCodebook
 from .log import InteractionLog
 
+#: How many times one appearance lineage may be split. Splitting a concept
+#: whose kinds are genuinely appearance-identical (crate/block, the flagship
+#: trap) cannot succeed -- there is no signal to find -- but nothing in
+#: split_concept's own data can tell that apart in advance from a split that
+#: DOES work (see concepts.py's docstring: the measured appearance-spread
+#: difference between a real and a fake trap is negligible). Left uncapped,
+#: a lifelong run keeps encountering fresh crate/block instances across new
+#: episodes, and each fresh STUCK verdict re-splits an already-split
+#: descendant, cascading indefinitely -- confirmed in a real 150-episode run,
+#: which produced 27 STUCK beliefs, all of them retired (already re-split)
+#: crate/block lineage. One split per lineage keeps the real benefit (a
+#: lineage that CAN be separated, like lever/switch, is validated to improve
+#: from one split) while bounding the pointless case to doubling once, not
+#: growing without limit.
+MAX_SPLIT_GENERATIONS: int = 1
+
 
 class AffordanceMemory:
     """Turns a stream of `(Observation, InteractionRecord)` pairs into
@@ -113,7 +129,14 @@ class AffordanceMemory:
         resulting concept a fresh, mildly-informative belief at the same key
         -- the old, blended evidence is not trustworthy for either half, so
         restarting cleanly is correct, not wasteful.
+
+        Does nothing once `target_concept` has already reached
+        `MAX_SPLIT_GENERATIONS`: the belief simply stays `STUCK`, which
+        already stops further budget going to this key (see `bank.
+        SETTLED_STATUSES`) without cascading the concept space further.
         """
+        if self.concepts.concept(target_concept).generation >= MAX_SPLIT_GENERATIONS:
+            return
         action, tool_concept = key[1], key[2]
         id_a, id_b = self.concepts.split_concept(target_concept)
         for new_id in (id_a, id_b):

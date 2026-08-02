@@ -424,3 +424,36 @@ hardware and did not immediately fail. That data predates every fix in this
 entry, so it validates that the backend runs at all, not the current code
 specifically -- scripts/isaac_smoke_test.py and scripts/run_lama_isaac.py
 remain the way to check the code as it stands now.
+
+**A follow-up bug this entry's own fixes exposed, found by actually running
+`scripts/run_lifelong.py` for 150 episodes rather than by unit tests alone.**
+27 beliefs came back STUCK -- all resolving to crate/block, and all keyed on
+already-retired (once-split) concepts. Because crate/block are appearance-
+identical, splitting them can never succeed at separating future instances
+(D7's own empirical validation already showed this: 50/50, unchanged from
+chance); left uncapped, every fresh episode's crate/block instances
+eventually re-accumulate enough evidence to trip STUCK again on whichever
+descendant they land in, re-splitting it, cascading indefinitely. With the
+same seed, this produced 73 concepts and 27 stuck beliefs where roughly a
+dozen concepts were structurally expected.
+
+Considered and rejected: gating the split on how strongly the recent
+appearance evidence itself looks bimodal. Measured directly, it does not
+discriminate -- a real trap's appearance-projection spread and a fake one's
+came out at 0.078 vs 0.079 across 30 trials, because a small true gap
+(lever/switch's ~0.10) does not detectably widen a noisy spread. There is no
+cheap signal in `split_concept`'s own data to tell "this split will help"
+from "this split cannot help" in advance.
+
+Fixed instead with `Concept.generation` (0 for an ordinarily-merged concept,
+N+1 for a concept produced by splitting a generation-N one) and
+`AffordanceMemory.MAX_SPLIT_GENERATIONS = 1`: a lineage may be split once,
+never again -- if it is still bimodal after that, the belief just stays
+`STUCK`, which already stops budget going to that key without fragmenting
+the concept space further. Re-running the same 150-episode, same-seed
+scenario after the fix: 73 concepts down to 21, 27 stuck down to 2, and
+CONFIRMED beliefs went UP (35 to 42) despite the same budget -- the
+cascading re-splits were not just wasteful bookkeeping, they were actively
+destroying accumulated evidence by resetting fresh, weak-prior beliefs on
+every re-split. The validated lever/switch benefit (73/27, 88/12 sorting)
+is unaffected, confirmed by rerunning that specific check after the change.
