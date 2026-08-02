@@ -1,48 +1,182 @@
-"""Evaluation harness: transfer, retention, efficiency metrics."""
+"""Evaluation harness: the metrics from the README's evaluation plan.
+
+Every method here is oracle-side code -- it is allowed to read hidden ground
+truth, unlike anything in `imagination/`, `verification/` or `memory/`. That
+is the entire point of the split between `Environment` and `AffordanceOracle`
+(`env/interface.py`): the agent never sees what this module sees.
+
+**The one genuinely hard part.** A confirmed belief is keyed by
+`(concept_id, verb, tool_concept_id)` -- the agent's own appearance-formed
+concepts. Ground truth is keyed by `(kind, verb, tool_kind)` -- real object
+kinds. These are different key spaces, and a confirmed belief can only be
+scored against ground truth once its concept has been resolved back to the
+kind(s) it actually corresponds to. `_ConceptKindTracker` does that
+resolution while objects are still live in the current episode -- the oracle
+cannot identify an object once a later `reset()` has replaced it, so this
+has to happen incrementally, episode by episode, not retrospectively at the
+end of a run.
+
+That resolution is also where the project's central honesty check lives: a
+concept that resolves to MORE THAN ONE kind (crate and block sharing one
+concept, because they look identical) is a blended concept, and a "confirmed"
+belief about it is answering for the blend, not for either kind alone. This
+module reports that rate explicitly rather than only reporting an aggregate
+precision number that would hide it.
+"""
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict
-from typing import List, Dict, Any
+from collections import Counter, defaultdict
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable
+
+from ..env import catalogue
+from ..env.interface import AffordanceOracle, Environment
+from ..memory.memory import AffordanceMemory
 
 
-@dataclass
-class EvalMetrics:
-    """Metrics matching the LAMA evaluation plan."""
-    interactions_per_confirmed: float
-    precision: float
-    recall: float
-    retention: float
-    transfer_precision: float
-    transfer_recall: float
+def _make_oracle(env: Environment) -> AffordanceOracle:
+    """The right `AffordanceOracle` for `env`, chosen by its `backend_name`.
+
+    Imports are local so evaluating against the numpy backend never requires
+    Isaac Lab to be installed.
+    """
+    if env.backend_name == "numpy-warehouse":
+        from ..env.warehouse import WarehouseOracle
+
+        return WarehouseOracle(env)
+    if env.backend_name == "isaac-lab":
+        from ..env.isaac_warehouse import IsaacWarehouseOracle
+
+        return IsaacWarehouseOracle(env)
+    raise ValueError(f"no oracle registered for backend {env.backend_name!r}")
+
+
+@dataclass(frozen=True)
+class ConceptResolution:
+    """What a concept id actually turned out to mean, in ground truth.
+
+    Attributes:
+        concept_id: The agent's own concept id.
+        kind_counts: How many observed instances of this concept were each
+            true kind. More than one key present means this concept is
+            blended -- see the module docstring.
+        dominant_kind: The most common true kind, or `None` if the concept
+            was never resolved against a live object (e.g. formed from an
+            object whose episode ended before evaluation looked it up).
+    """
+
+    concept_id: int
+    kind_counts: Counter
+    dominant_kind: str | None
+
+    @property
+    def is_blended(self) -> bool:
+        return len(self.kind_counts) > 1
+
+
+class ConceptKindTracker:
+    """Resolves concept ids back to the true kinds behind them.
+
+    Must be fed `(env, mem)` right after each episode that used `env`, before
+    the next `reset()` invalidates the oracle's view of that episode's
+    objects -- `evaluate_*` below always calls `observe_episode` inline with
+    `run_episode`, never after the fact.
+    """
+
+    def __init__(self) -> None:
+        self._counts: dict[int, Counter] = defaultdict(Counter)
+
+    def observe_episode(
+        self, env: Environment, mem: AffordanceMemory, log_start: int
+    ) -> None:
+        """Resolve every ledger entry appended since `log_start` (i.e. during
+        the episode just run) against `env`'s oracle, while still valid."""
+        oracle = _make_oracle(env)
+        for entry in mem.log.entries()[log_start:]:
+            self._note(oracle, entry.target_concept, entry.object_id)
+            if entry.tool_concept is not None and entry.tool_id is not None:
+                self._note(oracle, entry.tool_concept, entry.tool_id)
+
+    def _note(self, oracle: AffordanceOracle, concept_id: int, object_id: str) -> None:
+        try:
+            kind = oracle.object_kind(object_id)
+        except KeyError:
+            return
+        self._counts[concept_id][kind] += 1
+
+    def resolve(self, concept_id: int) -> ConceptResolution:
+        counts = self._counts.get(concept_id, Counter())
+        dominant = counts.most_common(1)[0][0] if counts else None
+        return ConceptResolution(concept_id, counts, dominant)
+
+    def blended_concepts(self) -> tuple[ConceptResolution, ...]:
+        return tuple(
+            self.resolve(c) for c in self._counts if self.resolve(c).is_blended
+        )
+
+
+def _ground_truth_is_real(kind: str, action, tool_kind: str | None) -> bool:
+    return catalogue.lookup(kind, action, tool_kind).is_real
+
+
+def _confirmed_matches(
+    tracker: ConceptKindTracker, belief_key: tuple,
+) -> tuple[bool, str | None, str | None]:
+    """`(is_correct, dominant_kind, dominant_tool_kind)` for one confirmed
+    belief key, `is_correct` meaning the dominant kind(s) genuinely afford
+    this verb in ground truth."""
+    target_concept, action, tool_concept = belief_key
+    target_kind = tracker.resolve(target_concept).dominant_kind
+    tool_kind = tracker.resolve(tool_concept).dominant_kind if tool_concept is not None else None
+    if target_kind is None:
+        return False, None, tool_kind
+    return _ground_truth_is_real(target_kind, action, tool_kind), target_kind, tool_kind
 
 
 class Evaluator:
-    """Runs evaluation episodes and computes metrics."""
+    """Runs evaluation episodes and computes the README's metrics.
 
-    def __init__(self, env_factory, memory_factory, run_episode_fn):
+    Args:
+        env_factory: `(seed, **kwargs) -> Environment`. `include_held_out` is
+            the one kwarg `evaluate_transfer` passes through; it must match
+            `Warehouse`/`IsaacWarehouse`'s actual parameter name.
+        memory_factory: `() -> AffordanceMemory`.
+        run_episode_fn: `verification.loop.run_episode` (or a drop-in),
+            injected rather than imported so this module never has to import
+            `verification/` and risk a cycle back through `planner/`.
+    """
+
+    def __init__(
+        self,
+        env_factory: Callable[..., Environment],
+        memory_factory: Callable[[], AffordanceMemory],
+        run_episode_fn: Callable,
+    ) -> None:
         self.env_factory = env_factory
         self.memory_factory = memory_factory
         self.run_episode = run_episode_fn
 
-    def evaluate_efficiency(
-        self,
-        n_episodes: int = 10,
-        seed: int = 0,
-    ) -> Dict[str, float]:
-        """Interactions per confirmed affordance (headline metric)."""
+    def _run_tracked(
+        self, env: Environment, mem: AffordanceMemory, n_episodes: int, seed: int,
+        tracker: ConceptKindTracker,
+    ) -> None:
+        for ep in range(n_episodes):
+            log_start = len(mem.log)
+            self.run_episode(env, mem, seed=seed + ep)
+            tracker.observe_episode(env, mem, log_start)
+
+    def evaluate_efficiency(self, n_episodes: int = 10, seed: int = 0) -> dict[str, Any]:
+        """Interactions per confirmed affordance -- the headline number."""
         env = self.env_factory(seed=seed)
         mem = self.memory_factory()
-
-        total_interactions = 0
-        for ep in range(n_episodes):
-            steps = self.run_episode(env, mem, seed=seed + ep)
-            tested = sum(1 for s in steps if s.hypothesis is not None)
-            total_interactions += tested
+        tracker = ConceptKindTracker()
+        self._run_tracked(env, mem, n_episodes, seed, tracker)
 
         confirmed = len(mem.bank.confirmed())
+        total_interactions = len(mem.log)
         return {
             "interactions_per_confirmed": total_interactions / max(1, confirmed),
             "total_interactions": total_interactions,
@@ -50,139 +184,119 @@ class Evaluator:
         }
 
     def evaluate_precision_recall(
-        self,
-        n_episodes: int = 20,
-        seed: int = 0,
-    ) -> Dict[str, float]:
-        """Precision/recall of affordance bank vs hidden ground truth."""
-        # This requires oracle access to true affordances
+        self, n_episodes: int = 20, seed: int = 0
+    ) -> dict[str, Any]:
+        """Precision/recall of confirmed beliefs against hidden ground truth,
+        resolved through concept-to-kind mapping (see the module docstring).
+        """
         env = self.env_factory(seed=seed)
-        oracle = env.oracle  # assumes WarehouseOracle/IsaacWarehouseOracle
         mem = self.memory_factory()
+        tracker = ConceptKindTracker()
+        self._run_tracked(env, mem, n_episodes, seed, tracker)
 
-        # Run episodes
-        for ep in range(n_episodes):
-            self.run_episode(env, mem, seed=seed + ep)
-
-        # Compare confirmed beliefs to ground truth
-        true_affordances = oracle.ground_truth_affordances()
         confirmed = mem.bank.confirmed()
+        tp = sum(1 for b in confirmed if _confirmed_matches(tracker, b.key)[0])
+        fp = len(confirmed) - tp
 
-        tp = fp = fn = 0
-        for belief in confirmed:
-            key = belief.key
-            if key in true_affordances:
-                if true_affordances[key] > 0.5:
-                    tp += 1
-                else:
-                    fp += 1
-            else:
-                fp += 1
-
-        for key, prob in true_affordances.items():
-            if prob > 0.5 and key not in [b.key for b in confirmed]:
-                fn += 1
+        oracle = _make_oracle(self.env_factory(seed=seed))
+        reachable_real = [a for a in oracle.catalogue_affordances() if a.is_real]
+        found_kinds = {
+            (r.dominant_kind, b.key[1], tracker.resolve(b.key[2]).dominant_kind
+             if b.key[2] is not None else None)
+            for b in confirmed
+            for r in [tracker.resolve(b.key[0])]
+            if r.dominant_kind is not None
+        }
+        fn = sum(1 for a in reachable_real if a.key not in found_kinds)
 
         precision = tp / max(1, tp + fp)
         recall = tp / max(1, tp + fn)
-
-        return {"precision": precision, "recall": recall, "tp": tp, "fp": fp, "fn": fn}
+        blended = tracker.blended_concepts()
+        return {
+            "precision": precision, "recall": recall,
+            "tp": tp, "fp": fp, "fn": fn,
+            "blended_concept_count": len(blended),
+            "blended_concepts": [
+                {"concept_id": r.concept_id, "kinds": dict(r.kind_counts)}
+                for r in blended
+            ],
+        }
 
     def evaluate_retention(
-        self,
-        task_a_episodes: int = 10,
-        task_b_episodes: int = 10,
-        seed: int = 0,
-    ) -> Dict[str, float]:
-        """Retention across tasks/layouts."""
+        self, task_a_episodes: int = 10, task_b_episodes: int = 10, seed: int = 0
+    ) -> dict[str, Any]:
+        """Fraction of beliefs confirmed after task A that are still
+        confirmed after task B runs on the same, persistent memory."""
         env = self.env_factory(seed=seed)
         mem = self.memory_factory()
+        tracker = ConceptKindTracker()
 
-        # Task A
-        for ep in range(task_a_episodes):
-            self.run_episode(env, mem, seed=seed + ep)
+        self._run_tracked(env, mem, task_a_episodes, seed, tracker)
+        confirmed_a = {b.key for b in mem.bank.confirmed()}
 
-        confirmed_a = {b.key: b for b in mem.bank.confirmed()}
+        self._run_tracked(env, mem, task_b_episodes, seed + task_a_episodes, tracker)
+        confirmed_b = {b.key for b in mem.bank.confirmed()}
 
-        # Task B (different layout)
-        for ep in range(task_b_episodes):
-            self.run_episode(env, mem, seed=seed + task_a_episodes + ep)
-
-        confirmed_b = {b.key: b for b in mem.bank.confirmed()}
-
-        # Retention: fraction of A beliefs still confirmed after B
         retained = sum(1 for k in confirmed_a if k in confirmed_b)
-        retention = retained / max(1, len(confirmed_a))
-
         return {
-            "retention": retention,
+            "retention": retained / max(1, len(confirmed_a)),
             "confirmed_task_a": len(confirmed_a),
             "confirmed_task_b": len(confirmed_b),
             "retained_count": retained,
         }
 
     def evaluate_transfer(
-        self,
-        train_episodes: int = 50,
-        test_episodes: int = 10,
-        held_out_kinds: List[str] = None,
-        seed: int = 0,
-    ) -> Dict[str, float]:
-        """Transfer to held-out object kinds."""
-        if held_out_kinds is None:
-            held_out_kinds = ["pallet", "drum", "switch"]
-
-        # Train with held-out kinds disabled
-        env_train = self.env_factory(seed=seed, held_out=held_out_kinds)
+        self, train_episodes: int = 50, test_episodes: int = 10, seed: int = 0
+    ) -> dict[str, Any]:
+        """Precision/recall restricted to the held-out kinds, after training
+        with them absent and testing with them present."""
+        env_train = self.env_factory(seed=seed, include_held_out=False)
         mem = self.memory_factory()
-        for ep in range(train_episodes):
-            self.run_episode(env_train, mem, seed=seed + ep)
+        tracker = ConceptKindTracker()
+        self._run_tracked(env_train, mem, train_episodes, seed, tracker)
 
-        # Test with held-out kinds enabled
-        env_test = self.env_factory(seed=seed + 1000, held_out=[])
-        oracle = env_test.oracle
-        true_held_out = {k: v for k, v in oracle.ground_truth_affordances().items()
-                         if any(h in str(k) for h in held_out_kinds)}
+        env_test = self.env_factory(seed=seed + 1000, include_held_out=True)
+        self._run_tracked(env_test, mem, test_episodes, seed + 1000, tracker)
 
-        # Run test episodes
-        for ep in range(test_episodes):
-            self.run_episode(env_test, mem, seed=seed + 1000 + ep)
+        held_out_kinds = {
+            name for name, spec in catalogue.KINDS.items() if spec.held_out
+        }
+        confirmed = mem.bank.confirmed()
+        on_held_out = [
+            b for b in confirmed
+            if tracker.resolve(b.key[0]).dominant_kind in held_out_kinds
+        ]
+        tp = sum(1 for b in on_held_out if _confirmed_matches(tracker, b.key)[0])
+        fp = len(on_held_out) - tp
 
-        # Evaluate on held-out
-        confirmed = {b.key: b for b in mem.bank.confirmed()}
-        tp = sum(1 for k in true_held_out if k in confirmed and true_held_out[k] > 0.5)
-        fp = sum(1 for k in confirmed if k in true_held_out and true_held_out[k] <= 0.5)
-        fn = sum(1 for k, v in true_held_out.items() if v > 0.5 and k not in confirmed)
-
-        precision = tp / max(1, tp + fp)
-        recall = tp / max(1, tp + fn)
+        oracle = _make_oracle(env_test)
+        true_held_out_real = [
+            a for a in oracle.catalogue_affordances()
+            if a.is_real and a.kind in held_out_kinds
+        ]
+        found = {
+            (tracker.resolve(b.key[0]).dominant_kind, b.key[1],
+             tracker.resolve(b.key[2]).dominant_kind if b.key[2] is not None else None)
+            for b in on_held_out
+        }
+        fn = sum(1 for a in true_held_out_real if a.key not in found)
 
         return {
-            "transfer_precision": precision,
-            "transfer_recall": recall,
-            "held_out_kinds": held_out_kinds,
+            "transfer_precision": tp / max(1, tp + fp),
+            "transfer_recall": tp / max(1, tp + fn),
+            "held_out_kinds": sorted(held_out_kinds),
+            "confirmed_on_held_out": len(on_held_out),
         }
 
-    def run_full_eval(self, output_path: str = "results/eval_results.json"):
-        """Run all evaluations and save."""
-        results = {}
-
-        print("Running efficiency eval...")
-        results["efficiency"] = self.evaluate_efficiency()
-
-        print("Running precision/recall...")
-        results["precision_recall"] = self.evaluate_precision_recall()
-
-        print("Running retention...")
-        results["retention"] = self.evaluate_retention()
-
-        print("Running transfer...")
-        results["transfer"] = self.evaluate_transfer()
-
-        # Save
-        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, "w") as f:
-            json.dump(results, f, indent=2)
-
-        print(f"Results saved to {output_path}")
+    def run_full_eval(self, output_path: str = "outputs/eval_results.json") -> dict:
+        """Run every evaluation and save the combined result."""
+        results = {
+            "efficiency": self.evaluate_efficiency(),
+            "precision_recall": self.evaluate_precision_recall(),
+            "retention": self.evaluate_retention(),
+            "transfer": self.evaluate_transfer(),
+        }
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(results, indent=2))
         return results
