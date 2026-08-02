@@ -144,3 +144,56 @@ def test_evaluate_transfer_runs_and_uses_the_real_include_held_out_flag():
     assert set(result["held_out_kinds"]) == {"switch", "drum", "bench"}
     assert 0.0 <= result["transfer_precision"] <= 1.0
     assert 0.0 <= result["transfer_recall"] <= 1.0
+
+
+# --------------------------------------------------------------------------- #
+# role-broken-out precision/recall: the headline research metric (D5)
+# --------------------------------------------------------------------------- #
+def test_precision_recall_reports_all_three_roles():
+    ev = Evaluator(_env_factory, AffordanceMemory, run_episode)
+    result = ev.evaluate_precision_recall(n_episodes=10, seed=0)
+    assert set(result["by_role"]) == {"primary", "secondary", "incidental"}
+
+
+def test_role_breakdown_reachable_counts_sum_to_the_catalogue():
+    """Every reachable real affordance must land in exactly one role bucket,
+    so the three reachable counts should add up to the same total recall()
+    is computed against overall."""
+    from lama.env.warehouse import WarehouseOracle
+
+    ev = Evaluator(_env_factory, AffordanceMemory, run_episode)
+    result = ev.evaluate_precision_recall(n_episodes=5, seed=1)
+    oracle = WarehouseOracle(_env_factory(seed=1))
+    total_reachable_real = sum(
+        1 for a in oracle.catalogue_affordances() if a.is_real
+    )
+    by_role_total = sum(v["reachable"] for v in result["by_role"].values())
+    assert by_role_total == total_reachable_real
+
+
+def test_role_breakdown_recall_is_bounded():
+    ev = Evaluator(_env_factory, AffordanceMemory, run_episode)
+    result = ev.evaluate_precision_recall(n_episodes=10, seed=2)
+    for role, stats in result["by_role"].items():
+        assert 0.0 <= stats["recall"] <= 1.0, role
+        assert stats["confirmed"] >= 0
+        assert stats["reachable"] >= 0
+
+
+def test_role_breakdown_confirmed_counts_sum_to_true_positives():
+    ev = Evaluator(_env_factory, AffordanceMemory, run_episode)
+    result = ev.evaluate_precision_recall(n_episodes=15, seed=0)
+    by_role_confirmed = sum(v["confirmed"] for v in result["by_role"].values())
+    assert by_role_confirmed == result["tp"]
+
+
+def test_secondary_affordances_are_harder_to_confirm_than_primary_ones():
+    """The core hypothesis this project's whole design (D5) is built around,
+    checked directly: with a limited number of episodes, primary affordances
+    -- easy to stumble into by design -- should be confirmed at a higher
+    rate than secondary ones, which require the right relational setup."""
+    ev = Evaluator(_env_factory, AffordanceMemory, run_episode)
+    result = ev.evaluate_precision_recall(n_episodes=20, seed=0)
+    primary_recall = result["by_role"]["primary"]["recall"]
+    secondary_recall = result["by_role"]["secondary"]["recall"]
+    assert secondary_recall <= primary_recall

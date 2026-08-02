@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..env import catalogue
+from ..env.affordance import Role
 from ..env.interface import AffordanceOracle, Environment
 from ..memory.memory import AffordanceMemory
 
@@ -118,22 +119,26 @@ class ConceptKindTracker:
         )
 
 
-def _ground_truth_is_real(kind: str, action, tool_kind: str | None) -> bool:
-    return catalogue.lookup(kind, action, tool_kind).is_real
-
-
-def _confirmed_matches(
+def _confirmed_match(
     tracker: ConceptKindTracker, belief_key: tuple,
-) -> tuple[bool, str | None, str | None]:
-    """`(is_correct, dominant_kind, dominant_tool_kind)` for one confirmed
-    belief key, `is_correct` meaning the dominant kind(s) genuinely afford
-    this verb in ground truth."""
+):
+    """`(matched_affordance, dominant_kind, dominant_tool_kind)` for one
+    confirmed belief key. `matched_affordance` is `None` if the dominant kind
+    is unresolved, or does not genuinely afford this verb in ground truth --
+    otherwise it is the real `Affordance`, whose `.role` is what lets
+    precision/recall be broken out by PRIMARY/SECONDARY/INCIDENTAL, the
+    headline distinction this project's whole design is organised around
+    (D5 in docs/DECISIONS.md): any policy can stumble into a primary
+    affordance, the interesting question is whether targeted verification
+    finds secondary ones faster than blind exploration does.
+    """
     target_concept, action, tool_concept = belief_key
     target_kind = tracker.resolve(target_concept).dominant_kind
     tool_kind = tracker.resolve(tool_concept).dominant_kind if tool_concept is not None else None
     if target_kind is None:
-        return False, None, tool_kind
-    return _ground_truth_is_real(target_kind, action, tool_kind), target_kind, tool_kind
+        return None, None, tool_kind
+    aff = catalogue.lookup(target_kind, action, tool_kind)
+    return (aff if aff.is_real else None), target_kind, tool_kind
 
 
 class Evaluator:
@@ -195,7 +200,8 @@ class Evaluator:
         self._run_tracked(env, mem, n_episodes, seed, tracker)
 
         confirmed = mem.bank.confirmed()
-        tp = sum(1 for b in confirmed if _confirmed_matches(tracker, b.key)[0])
+        matches = {b.key: _confirmed_match(tracker, b.key) for b in confirmed}
+        tp = sum(1 for aff, _, _ in matches.values() if aff is not None)
         fp = len(confirmed) - tp
 
         oracle = _make_oracle(self.env_factory(seed=seed))
@@ -211,10 +217,36 @@ class Evaluator:
 
         precision = tp / max(1, tp + fp)
         recall = tp / max(1, tp + fn)
+
+        # The headline breakdown (D5 in docs/DECISIONS.md): any exploration
+        # strategy can stumble into a PRIMARY affordance -- it is what the
+        # object is FOR, and easy to trigger by accident. SECONDARY
+        # affordances (using an object as a means to an end) are rare and
+        # easy to miss; whether targeted verification finds them faster than
+        # blind exploration is the actual research question, and an
+        # aggregate precision/recall number hides the answer.
+        by_role: dict[str, dict[str, Any]] = {}
+        for role in (Role.PRIMARY, Role.SECONDARY, Role.INCIDENTAL):
+            role_reachable = [a for a in reachable_real if a.role is role]
+            role_tp = sum(
+                1 for aff, _, _ in matches.values() if aff is not None and aff.role is role
+            )
+            role_found = {
+                (aff.kind, aff.action, aff.tool_kind)
+                for aff, _, _ in matches.values() if aff is not None and aff.role is role
+            }
+            role_fn = sum(1 for a in role_reachable if a.key not in role_found)
+            by_role[role.name.lower()] = {
+                "confirmed": role_tp,
+                "reachable": len(role_reachable),
+                "recall": role_tp / max(1, role_tp + role_fn),
+            }
+
         blended = tracker.blended_concepts()
         return {
             "precision": precision, "recall": recall,
             "tp": tp, "fp": fp, "fn": fn,
+            "by_role": by_role,
             "blended_concept_count": len(blended),
             "blended_concepts": [
                 {"concept_id": r.concept_id, "kinds": dict(r.kind_counts)}
@@ -266,7 +298,9 @@ class Evaluator:
             b for b in confirmed
             if tracker.resolve(b.key[0]).dominant_kind in held_out_kinds
         ]
-        tp = sum(1 for b in on_held_out if _confirmed_matches(tracker, b.key)[0])
+        tp = sum(
+            1 for b in on_held_out if _confirmed_match(tracker, b.key)[0] is not None
+        )
         fp = len(on_held_out) - tp
 
         oracle = _make_oracle(env_test)
