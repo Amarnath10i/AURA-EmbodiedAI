@@ -6,33 +6,33 @@ Deliberately thin. Selection decides what is worth testing (`select.py`) and
 revision on contradiction; this module's only job is to turn a choice into an
 actual environment step and thread the resulting observation forward.
 
-**A real, documented limitation.** `imagine`/`select` only ever propose verbs
-on objects already within reach: deciding where to go next is a planning
-problem, and `planner/` does not exist yet. Without something filling that
-gap, an episode with nothing already close to the agent at reset would end
-having tested nothing. `_nearest_unreached` is a minimal, deliberately dumb
-stand-in: when nothing reachable is worth testing, move toward whatever is
-closest. It has no opinion about which unreached object looks most likely to
-teach the bank something -- that is exactly the kind of decision the eventual
-planner should make instead of this function.
+**Goal-directed pursuit is optional, not required.** Pass `goal` and this
+builds a `RegressionPlanner` over the current bank, computes which
+`(concept, verb, tool)` keys are relevant to reaching it, and hands that to
+`imagine` so `select.py` prioritises them (see `planner/planner.py` and
+`imagination/hypothesis.py`). Leave `goal` unset and behaviour is exactly the
+uncertainty-driven loop this project had before goals existed -- nothing
+about ordinary exploration depends on one being supplied.
+
+**Choosing where to walk is no longer a dummy heuristic.** `imagine`/`select`
+only ever propose verbs on objects already within reach; something still has
+to decide where to walk when nothing reachable is worth testing.
+`exploration.select_exploration_target` picks the not-yet-reachable object
+with the best expected-information-gain-per-distance, the same acquisition
+principle `select.py` uses for testing, rather than simply the closest thing.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..env import (
-    Action,
-    Environment,
-    Interaction,
-    Observation,
-    ObjectView,
-    StepResult,
-)
+from ..env import Action, Environment, Interaction, Observation, StepResult
 from ..env.actions import cost as action_cost
+from ..exploration import select_exploration_target
 from ..imagination.hypothesis import Hypothesis, imagine
 from ..memory.bank import Revision
 from ..memory.memory import AffordanceMemory
+from ..planner import Goal, RegressionPlanner
 from .select import select_next
 
 
@@ -52,19 +52,11 @@ class VerificationStep:
     revision: Revision | None
 
 
-def _nearest_unreached(observation: Observation) -> ObjectView | None:
-    """Closest object not currently within reach, or `None` if everything
-    visible already is. See the module docstring: a stand-in for planning."""
-    candidates = [
-        o for o in observation.objects if not o.within_reach and not o.held
-    ]
-    if not candidates:
-        return None
-    return min(candidates, key=lambda o: o.distance)
-
-
 def verify_once(
-    env: Environment, memory: AffordanceMemory, observation: Observation
+    env: Environment,
+    memory: AffordanceMemory,
+    observation: Observation,
+    goal: Goal | None = None,
 ) -> VerificationStep:
     """Imagine, select, and either test a hypothesis or move toward one.
 
@@ -72,14 +64,18 @@ def verify_once(
     `reset` or the previous `step` -- since `Environment` has no way to ask
     for the current observation without stepping.
     """
-    hypotheses = imagine(observation, memory)
+    relevant_keys = None
+    if goal is not None:
+        relevant_keys = RegressionPlanner(memory.bank).relevant_keys(goal)
+
+    hypotheses = imagine(observation, memory, relevant_keys)
     chosen = select_next(hypotheses, env.budget_remaining)
     if chosen is not None:
         step = env.step(Interaction(chosen.action, chosen.target_id))
         revision = memory.observe(observation, step.record)
         return VerificationStep(chosen, None, step, revision)
 
-    target = _nearest_unreached(observation)
+    target = select_exploration_target(observation, memory)
     if target is not None and env.budget_remaining >= action_cost(Action.APPROACH):
         step = env.step(Interaction(Action.APPROACH, target.object_id))
         return VerificationStep(None, target.object_id, step, None)
@@ -88,7 +84,10 @@ def verify_once(
 
 
 def run_episode(
-    env: Environment, memory: AffordanceMemory, seed: int | None = None
+    env: Environment,
+    memory: AffordanceMemory,
+    seed: int | None = None,
+    goal: Goal | None = None,
 ) -> tuple[VerificationStep, ...]:
     """Run one episode of the loop to completion.
 
@@ -99,7 +98,7 @@ def run_episode(
     observation = env.reset(seed=seed)
     steps: list[VerificationStep] = []
     while env.budget_remaining > 0:
-        result = verify_once(env, memory, observation)
+        result = verify_once(env, memory, observation, goal)
         if result.step is None:
             break
         steps.append(result)
