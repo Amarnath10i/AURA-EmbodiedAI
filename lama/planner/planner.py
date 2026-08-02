@@ -1,220 +1,215 @@
-"""Cross-Entropy Method (CEM) Planner with World Model."""
+"""Backward-chaining classical planning over confirmed affordance knowledge.
+
+The problem this exists to solve: with N verbs and M reachable objects, the
+raw space of things worth trying grows combinatorially, and it keeps growing
+as the verb set grows -- exactly the concern that motivated this module.
+Uncertainty-driven selection (`verification/select.py`) already prunes
+settled beliefs, but it has no notion of a GOAL: it is equally happy testing
+something irrelevant to what the agent is actually trying to achieve as
+something on the critical path to it.
+
+This module adds the other half: goal-directed relevance, via the classical
+AI technique the problem calls for -- STRIPS-style regression search,
+backward from the goal. Given a `Goal` ("some object of concept X should
+reach effect E"), `RegressionPlanner.relevant_keys` searches BACKWARD through
+CONFIRMED operators, asking "what would have to be true right before this
+effect, and what would have to be true right before THAT", and returns the
+set of `(concept, verb, tool_concept)` keys that participate in some chain
+reaching the goal. `imagination.hypothesis.imagine` looks up this set and
+boosts `Hypothesis.relevance` for anything in it, so `verification/select.py`
+naturally prefers goal-relevant tests over irrelevant ones -- without ever
+hard-restricting what CAN be tried. The agent can still learn about anything;
+it just tries goal-relevant things first, which is what turns "try every
+combination" into "try the combinations that could plausibly matter".
+
+This deliberately only chains through CONFIRMED knowledge: an operator the
+bank is not yet sure about cannot be trusted as a stepping stone. When the
+chain runs out of confirmed operators, it returns whatever it found so far --
+a partial chain is still useful (it identifies exactly which concept's
+behaviour is the missing piece), and ordinary uncertainty-driven exploration
+in `select.py` fills the rest of the gap on its own.
+"""
 
 from __future__ import annotations
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from dataclasses import dataclass
-from typing import Callable, Optional
-from lama.world_model.rssm import WorldModel, RSSMState
-from lama.memory.bank import AffordanceBank
-from collections import deque
+
+from ..env import Action, Effect
+from ..env.actions import spec
+from ..memory.bank import AffordanceBank, Belief
 
 
-@dataclass
-class PlanResult:
-    actions: torch.Tensor
-    values: torch.Tensor
-    rewards: torch.Tensor
+@dataclass(frozen=True)
+class Operator:
+    """A confirmed capability, in a form backward chaining can use.
 
+    Preconditions here are real, derived from the verb's own public metadata
+    (`ActionSpec`) rather than a placeholder -- that is what lets chaining
+    discover genuine multi-step structure, e.g. "must be holding something of
+    tool_concept, which means first grasping one, which needs a free
+    gripper".
+    """
 
-class CEMPlanner(nn.Module):
-    """Model-Predictive Control with Cross-Entropy Method."""
+    target_concept: int
+    action: Action
+    tool_concept: int | None
+    effect: Effect
+    reliability: float
+    needs_free_gripper: bool
+    needs_held_object: bool
+    remote_effect: Effect | None
+    remote_target_concept: int | None
+    remote_reliability: float
 
-    def __init__(
-        self,
-        world_model: WorldModel,
-        action_dim: int = 12,
-        horizon: int = 12,
-        n_candidates: int = 512,
-        n_elite: int = 64,
-        n_iterations: int = 8,
-        temperature: float = 0.5,
-        discount: float = 0.99,
-    ):
-        super().__init__()
-        self.world_model = world_model
-        self.action_dim = action_dim
-        self.horizon = horizon
-        self.n_candidates = n_candidates
-        self.n_elite = n_elite
-        self.n_iterations = n_iterations
-        self.temperature = temperature
-        self.discount = discount
+    @property
+    def key(self) -> tuple[int, Action, int | None]:
+        return (self.target_concept, self.action, self.tool_concept)
 
-    @torch.no_grad()
-    def plan(
-        self,
-        init_state: RSSMState,
-        n_steps: int = 1,
-    ) -> PlanResult:
-        """Plan action sequence using CEM."""
-        batch_size = init_state.deter.shape[0]
-        device = init_state.deter.device
-
-        # Expand initial state for candidates
-        init_state_expanded = RSSMState(
-            deter=init_state.deter.repeat(self.n_candidates, 1),
-            stoch=init_state.stoch.repeat(self.n_candidates, 1),
-            logits=init_state.logits.repeat(self.n_candidates, 1),
+    def satisfies(self, goal: "Goal") -> bool:
+        """Whether firing this operator can make `goal` true, directly or
+        through its remote effect -- the two ways a verb can change the
+        world (see `env/outcomes.py`)."""
+        direct = self.target_concept == goal.concept and self.effect is goal.effect
+        remote = (
+            self.remote_target_concept == goal.concept
+            and self.remote_effect is goal.effect
         )
-
-        # Initialize action distribution
-        mean = torch.zeros(self.horizon, self.action_dim, device=device)
-        std = torch.ones(self.horizon, self.action_dim, device=device)
-
-        for _ in range(self.n_iterations):
-            # Sample candidates
-            actions = mean.unsqueeze(0) + std.unsqueeze(0) * torch.randn(
-                self.n_candidates, self.horizon, self.action_dim, device=device
-            )
-            # Action space: one-hot for discrete verbs
-            actions = F.gumbel_softmax(actions, tau=self.temperature, hard=True, dim=-1)
-
-            # Imagine trajectory
-            stochs, rewards, values, continues = self.world_model.imagine_trajectory(
-                init_state_expanded, actions
-            )
-
-            # Compute returns (discounted sum)
-            discounts = self.discount ** torch.arange(self.horizon, device=device)
-            returns = (rewards * discounts).sum(dim=1)  # [n_candidates]
-
-            # Elite selection
-            elite_idx = returns.topk(self.n_elite).indices
-            elite_actions = actions[elite_idx]
-
-            # Update distribution
-            mean = elite_actions.mean(dim=0)
-            std = elite_actions.std(dim=0).clamp(min=0.1)
-
-        # Return best action sequence
-        best_idx = returns.argmax()
-        best_actions = actions[best_idx:best_idx+1]
-
-        return PlanResult(
-            actions=best_actions[0],
-            values=values[best_idx],
-            rewards=rewards[best_idx],
-        )
+        return direct or remote
 
 
-class MPPIPlanner(nn.Module):
-    """Model-Predictive Path Integral (MPPI) - gradient-free, sample-efficient."""
+def operator_from_belief(belief: Belief) -> Operator | None:
+    """The `Operator` a `CONFIRMED` belief implies, or `None` otherwise.
 
-    def __init__(
-        self,
-        world_model: WorldModel,
-        action_dim: int = 12,
-        horizon: int = 12,
-        n_samples: int = 256,
-        lambda_: float = 1.0,
-        noise_sigma: float = 0.5,
-    ):
-        super().__init__()
-        self.world_model = world_model
-        self.action_dim = action_dim
-        self.horizon = horizon
-        self.n_samples = n_samples
-        self.lambda_ = lambda_
-        self.noise_sigma = noise_sigma
-
-    @torch.no_grad()
-    def plan(self, init_state: RSSMState) -> PlanResult:
-        batch_size = init_state.deter.shape[0]
-        device = init_state.deter.device
-
-        # Expand for samples
-        init_state_expanded = RSSMState(
-            deter=init_state.deter.repeat(self.n_samples, 1),
-            stoch=init_state.stoch.repeat(self.n_samples, 1),
-            logits=init_state.logits.repeat(self.n_samples, 1),
-        )
-
-        # Sample action sequences
-        actions = torch.randn(
-            self.n_samples, self.horizon, self.action_dim, device=device
-        ) * self.noise_sigma
-        actions = F.gumbel_softmax(actions, tau=1.0, hard=True, dim=-1)
-
-        # Imagine trajectories
-        stochs, rewards, values, continues = self.world_model.imagine_trajectory(
-            init_state_expanded, actions
-        )
-
-        # Returns with soft-value (MPPI)
-        discounts = self.discount ** torch.arange(self.horizon, device=device)
-        returns = (rewards * discounts).sum(dim=1)
-
-        # MPPI weight: softmax over returns
-        weights = F.softmax(returns / self.lambda_, dim=0)
-        weighted_actions = (weights.view(-1, 1, 1) * actions).sum(dim=0)
-
-        return PlanResult(
-            actions=weighted_actions,
-            values=values,
-            rewards=rewards,
-        )
+    Only `CONFIRMED` beliefs produce an operator: a `PROVISIONAL` or `STUCK`
+    one is not knowledge a plan can be trusted to stand on.
+    """
+    if not belief.is_confirmed or belief.dominant_effect is None:
+        return None
+    target_concept, action, tool_concept = belief.key
+    s = spec(action)
+    remote = belief.dominant_remote
+    return Operator(
+        target_concept=target_concept,
+        action=action,
+        tool_concept=tool_concept,
+        effect=belief.dominant_effect,
+        reliability=belief.mean,
+        needs_free_gripper=s.needs_free_gripper,
+        needs_held_object=s.needs_held_object,
+        remote_effect=remote[1] if remote else None,
+        remote_target_concept=remote[0] if remote else None,
+        remote_reliability=belief.remote_rate,
+    )
 
 
-def make_planner(
-    world_model: WorldModel,
-    planner_type: str = "cem",
-    **kwargs,
-) -> nn.Module:
-    """Factory for planners."""
-    if planner_type == "cem":
-        return CEMPlanner(world_model, **kwargs)
-    elif planner_type == "mppi":
-        return MPPIPlanner(world_model, **kwargs)
-    elif planner_type == "regression":
-        return RegressionPlanner(kwargs.get("bank"))
-    else:
-        raise ValueError(f"Unknown planner: {planner_type}")
+@dataclass(frozen=True)
+class Goal:
+    """"Some object of `concept` should reach `effect`" -- satisfied either
+    by an operator whose own effect is this, or by an operator whose REMOTE
+    effect is this (the interesting case: opening a door by pressing a
+    plate elsewhere)."""
+
+    concept: int
+    effect: Effect
+
+
+@dataclass(frozen=True)
+class PlanStep:
+    """One link in a concrete backward-chained plan: an operator, and which
+    goal it was chosen to satisfy."""
+
+    operator: Operator
+    satisfies: Goal
+
+
+#: How much a relevance weight decays per hop away from the goal. A verb that
+#: directly achieves the goal is weight 1.0; the verb that gets you the tool
+#: for THAT verb is weight DECAY, and so on -- distant prerequisites still
+#: matter, just less than the immediate next step.
+_RELEVANCE_DECAY: float = 0.7
+
 
 class RegressionPlanner:
-    """Symbolic backward-chaining regression planner over confirmed operators."""
-    
+    """STRIPS-style backward chaining over the bank's confirmed operators."""
+
     def __init__(self, bank: AffordanceBank):
         self.bank = bank
-        
-    def plan(self, goal_predicate: str, max_depth: int = 5) -> list[dict] | None:
+
+    def operators(self) -> tuple[Operator, ...]:
+        """Every operator the bank's current confirmed knowledge implies."""
+        return tuple(
+            op for op in (operator_from_belief(b) for b in self.bank.confirmed())
+            if op is not None
+        )
+
+    def plan(self, goal: Goal, max_depth: int = 6) -> list[PlanStep] | None:
+        """One concrete chain of confirmed operators reaching `goal`, or
+        `None` if confirmed knowledge cannot currently reach it.
+
+        Most callers want `relevant_keys` instead -- this exists for
+        inspection/logging/tests, where seeing one concrete chain is more
+        readable than a weighted key set.
         """
-        Search backward from goal_predicate.
-        Returns a sequence of operators to achieve the goal, or None if no plan found.
-        """
-        # Get all confirmed operators
-        operators = [b.operator for b in self.bank.confirmed() if b.operator is not None]
-        
-        # Simple BFS regression search
-        # Queue stores tuples of (current_goals, plan_so_far)
-        queue = deque([({goal_predicate}, [])])
-        visited = set()
-        
-        while queue:
-            current_goals, plan = queue.popleft()
-            
-            # If no unsatisfied goals, plan is complete
-            if not current_goals:
-                return plan
-                
-            goals_tuple = frozenset(current_goals)
-            if goals_tuple in visited or len(plan) >= max_depth:
+        return self._search(goal, self.operators(), max_depth, frozenset())
+
+    def _search(
+        self, goal: Goal, operators: tuple[Operator, ...], depth: int,
+        seen: frozenset,
+    ) -> list[PlanStep] | None:
+        goal_id = (goal.concept, goal.effect)
+        if goal_id in seen or depth <= 0:
+            return None
+        seen = seen | {goal_id}
+
+        for op in operators:
+            if not op.satisfies(goal):
                 continue
-            visited.add(goals_tuple)
-            
-            # Pick a goal to resolve (for simplicity, we just take one)
-            goal = next(iter(current_goals))
-            remaining_goals = current_goals - {goal}
-            
-            # Find operators whose effect matches the goal
-            for op in operators:
-                effect_state = op["effect"].get("state")
-                if effect_state == goal:
-                    # New subgoals are the preconditions of this operator
-                    new_goals = remaining_goals.union(set(op["precondition"]))
-                    new_plan = [op] + plan
-                    queue.append((new_goals, new_plan))
-                    
+
+            prefix: list[PlanStep] = []
+            if op.needs_held_object and op.tool_concept is not None:
+                sub_plan = self._search(
+                    Goal(op.tool_concept, Effect.CARRIED), operators, depth - 1, seen
+                )
+                if sub_plan is None:
+                    continue  # this operator's prerequisite is unreachable; try another
+                prefix = sub_plan
+
+            return prefix + [PlanStep(op, goal)]
+
         return None
+
+    def relevant_keys(
+        self, goal: Goal, max_depth: int = 6
+    ) -> dict[tuple[int, Action, int | None], float]:
+        """Every `(concept, verb, tool_concept)` key that participates in
+        SOME chain reaching `goal`, weighted by proximity to the goal.
+
+        Unlike `plan`, this collects the union across every valid chain
+        rather than committing to one -- ranking wants to boost every
+        plausible route, not just the first one found; `verification/
+        select.py`'s greedy per-step choice handles actually committing to a
+        path as the episode unfolds.
+        """
+        weights: dict[tuple[int, Action, int | None], float] = {}
+        self._collect(goal, self.operators(), max_depth, frozenset(), 1.0, weights)
+        return weights
+
+    def _collect(
+        self, goal: Goal, operators: tuple[Operator, ...], depth: int,
+        seen: frozenset, weight: float,
+        out: dict[tuple[int, Action, int | None], float],
+    ) -> None:
+        goal_id = (goal.concept, goal.effect)
+        if goal_id in seen or depth <= 0:
+            return
+        seen = seen | {goal_id}
+
+        for op in operators:
+            if not op.satisfies(goal):
+                continue
+            out[op.key] = max(out.get(op.key, 0.0), weight)
+            if op.needs_held_object and op.tool_concept is not None:
+                self._collect(
+                    Goal(op.tool_concept, Effect.CARRIED), operators, depth - 1,
+                    seen, weight * _RELEVANCE_DECAY, out,
+                )
