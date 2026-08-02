@@ -13,6 +13,7 @@ from lama.env import Action
 from lama.evaluation.baselines import (
     NoveltyPolicy,
     RandomPolicy,
+    lama_no_safety_policy,
     uncertainty_only,
     uncertainty_only_policy,
 )
@@ -142,3 +143,52 @@ def test_uncertainty_only_policy_still_uses_cost_normalisation():
     expensive = hyp(target_id="expensive", status=Status.UNTESTED, cost=5.0)
     chosen = uncertainty_only_policy((cheap, expensive), 10.0)
     assert chosen.target_id == "cheap"
+
+
+# --------------------------------------------------------------------------- #
+# lama_no_safety_policy: the targeted ablation
+# --------------------------------------------------------------------------- #
+def test_no_safety_policy_ignores_irreversible_risk():
+    """The one thing this ablation must NOT respond to."""
+    safe = hyp(target_id="safe", status=Status.PROVISIONAL, credible_width=0.5,
+              irreversible_risk=0.0)
+    risky = hyp(target_id="risky", status=Status.PROVISIONAL, credible_width=0.5,
+               irreversible_risk=0.95)
+    from lama.evaluation.baselines import _no_safety_score
+
+    assert _no_safety_score(safe) == _no_safety_score(risky)
+
+
+def test_no_safety_policy_still_responds_to_curiosity_and_relevance():
+    """Unlike uncertainty_only, this ablation keeps the OTHER two bonuses --
+    only safety is removed."""
+    from lama.evaluation.baselines import _no_safety_score
+
+    plain = hyp(status=Status.PROVISIONAL, credible_width=0.5)
+    curious = hyp(status=Status.PROVISIONAL, credible_width=0.5, info_gain=1.0)
+    relevant = hyp(status=Status.PROVISIONAL, credible_width=0.5, relevance=1.0)
+    assert _no_safety_score(curious) > _no_safety_score(plain)
+    assert _no_safety_score(relevant) > _no_safety_score(plain)
+
+
+def test_no_safety_policy_never_picks_a_settled_hypothesis():
+    settled = hyp(status=Status.REFUTED)
+    assert lama_no_safety_policy((settled,), 10.0) is None
+
+
+def test_no_safety_policy_prefers_a_risky_hypothesis_full_select_would_discount():
+    """The concrete behavioural difference from the real select_next: with
+    risk removed from scoring, a risky-but-otherwise-equal hypothesis is no
+    longer penalised relative to a safe one."""
+    from lama.verification.select import score as full_score
+
+    safe = hyp(target_id="safe", status=Status.PROVISIONAL, credible_width=0.5,
+              irreversible_risk=0.0)
+    risky = hyp(target_id="risky", status=Status.PROVISIONAL, credible_width=0.5,
+               irreversible_risk=0.9)
+    assert full_score(risky) < full_score(safe), "full select_next discounts it"
+    from lama.evaluation.baselines import _no_safety_score
+
+    assert _no_safety_score(risky) == _no_safety_score(safe), (
+        "the ablation must not"
+    )

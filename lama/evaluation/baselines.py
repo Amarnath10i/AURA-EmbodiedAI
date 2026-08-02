@@ -38,7 +38,13 @@ from ..imagination.hypothesis import Hypothesis
 from ..memory.bank import SETTLED_STATUSES, Status
 from ..verification.select import uncertainty
 
-__all__ = ["RandomPolicy", "NoveltyPolicy", "uncertainty_only_policy", "uncertainty_only"]
+__all__ = [
+    "RandomPolicy",
+    "NoveltyPolicy",
+    "uncertainty_only_policy",
+    "uncertainty_only",
+    "lama_no_safety_policy",
+]
 
 
 def uncertainty_only(hypothesis: Hypothesis) -> float:
@@ -109,6 +115,48 @@ def uncertainty_only_policy(
     )
     for h in ranked:
         if uncertainty_only(h) <= 0.0:
+            break
+        return h
+    return None
+
+
+def _no_safety_score(hypothesis: Hypothesis) -> float:
+    from ..verification.select import INFO_GAIN_WEIGHT, RELEVANCE_WEIGHT
+
+    u = uncertainty(hypothesis)
+    if u <= 0.0:
+        return 0.0
+    base = u / hypothesis.cost
+    curiosity = 1.0 + INFO_GAIN_WEIGHT * hypothesis.info_gain
+    goal = 1.0 + RELEVANCE_WEIGHT * hypothesis.relevance
+    return base * curiosity * goal
+
+
+def lama_no_safety_policy(
+    hypotheses: tuple[Hypothesis, ...], budget_remaining: float
+) -> Hypothesis | None:
+    """The full `select.score` formula with ONLY the safety discount
+    (`1 - irreversible_risk`) removed -- curiosity and goal-relevance stay.
+
+    A targeted ablation, not one of the three standard baselines: it exists
+    specifically to test a hypothesis raised by the baseline comparison
+    (docs/RESEARCH_FINDINGS.md) -- that discounting irreversible verbs by
+    design trades off against discovering exactly the secondary affordances
+    that are only reachable through one (e.g. `TIP` on barrel/drum). If
+    secondary recall improves here relative to full `select_next` while
+    staying below `uncertainty_only_policy`, that supports the hypothesis
+    that safety specifically (not curiosity or cost-normalisation) is the
+    cost; if it does not, the tension has a different cause.
+    """
+    affordable = _affordable(hypotheses, budget_remaining)
+    ranked = sorted(
+        affordable,
+        key=lambda h: (
+            -_no_safety_score(h), h.target_id, h.action.value, h.tool_id or ""
+        ),
+    )
+    for h in ranked:
+        if _no_safety_score(h) <= 0.0:
             break
         return h
     return None

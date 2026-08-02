@@ -42,6 +42,7 @@ from lama.evaluation import Evaluator
 from lama.evaluation.baselines import (
     NoveltyPolicy,
     RandomPolicy,
+    lama_no_safety_policy,
     uncertainty_only_policy,
 )
 from lama.memory.memory import AffordanceMemory
@@ -52,6 +53,7 @@ POLICIES = {
     "random": lambda seed: RandomPolicy(seed=seed),
     "novelty": lambda seed: NoveltyPolicy(seed=seed),
     "uncertainty_only": lambda seed: uncertainty_only_policy,
+    "lama_no_safety": lambda seed: lama_no_safety_policy,
     "lama": lambda seed: select_next,
 }
 
