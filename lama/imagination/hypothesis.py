@@ -23,6 +23,14 @@ particular object. Hidden, object-specific preconditions
 (`env.affordance.Precondition`, e.g. "the door must already be unlocked") are
 never read here, or anywhere in this module -- they are oracle-only, and the
 whole point of imagining and then verifying is to find them out the hard way.
+
+**Goal-directed relevance.** `imagine` optionally takes `relevant_keys`, a
+`{(concept, verb, tool_concept): weight}` map -- typically
+`planner.RegressionPlanner.relevant_keys(goal)` -- and stamps `Hypothesis.
+relevance` from it. Left at the default (`None`), every hypothesis scores 0
+relevance and ranking is exactly the uncertainty-driven behaviour this module
+had before goals existed. This keeps `imagine` itself goal-agnostic: it never
+imports the planner, it just has a slot the planner can fill.
 """
 
 from __future__ import annotations
@@ -40,6 +48,12 @@ from ..memory.memory import AffordanceMemory
 HYPOTHESIS_ACTIONS: tuple[Action, ...] = tuple(
     a for a in INTERACTION_ACTIONS if a is not Action.RELEASE
 )
+
+#: `irreversible_risk` for a hypothesis with no belief yet: the same
+#: uninformed Beta(1, 1) prior mean the bank itself starts every belief at
+#: (`Belief.irreversible_alpha/beta`). A never-tried verb is treated as
+#: moderately risky, not as proven safe -- see `verification/select.py`.
+_UNTESTED_IRREVERSIBLE_RISK = 0.5
 
 
 @dataclass(frozen=True)
@@ -62,6 +76,20 @@ class Hypothesis:
             testing", never as "zero information", which is the opposite.
         dominant_effect: What the bank thinks would happen, if it has an
             opinion.
+        predicted_effect: The belief's STRIPS-style operator summary
+            (`Belief.operator`), for inspection/logging -- `None` unless the
+            belief is `CONFIRMED`.
+        irreversible_risk: Estimated probability that testing this would
+            cause a change nothing can undo. Defaults to the uninformed prior
+            when there is no belief yet, not to 0 -- an untested verb is not
+            assumed safe.
+        info_gain: How much is still unknown about `target_concept` as a
+            whole (`AffordanceBank.concept_uncertainty`), independent of this
+            specific verb -- favours objects that are broadly uncertain, not
+            just this one hypothesis.
+        relevance: How relevant this hypothesis is to whatever goal the
+            caller supplied via `imagine`'s `relevant_keys`. 0 unless a goal
+            was given and this key is on some chain reaching it.
         cost: Budget units attempting this would cost.
     """
 
@@ -75,9 +103,10 @@ class Hypothesis:
     credible_width: float | None
     dominant_effect: Effect | None
     predicted_effect: dict | None
+    irreversible_risk: float
+    info_gain: float
     cost: float
     relevance: float = 0.0
-    info_gain: float = 0.0
 
     @property
     def is_relational(self) -> bool:
@@ -85,7 +114,9 @@ class Hypothesis:
 
 
 def imagine(
-    observation: Observation, memory: AffordanceMemory
+    observation: Observation,
+    memory: AffordanceMemory,
+    relevant_keys: dict[tuple, float] | None = None,
 ) -> tuple[Hypothesis, ...]:
     """Every affordance hypothesis attemptable right now, each annotated with
     the bank's current belief about it.
@@ -102,25 +133,14 @@ def imagine(
     tool_concept = (
         memory.concepts.peek(tool_view.appearance) if tool_view is not None else None
     )
-    
-    from ..memory.bank import _SETTLED
-    def compute_concept_info_gain(concept_id: int | None) -> float:
-        if concept_id is None:
-            return 1.0
-        total_uncertainty = 0.0
-        count = 0
-        for b in memory.bank.beliefs_for_concept(concept_id):
-            if b.status not in _SETTLED:
-                lo, hi = b.credible_interval
-                total_uncertainty += (hi - lo)
-                count += 1
-        return (total_uncertainty / count) if count > 0 else 0.0
 
     hypotheses: list[Hypothesis] = []
     for target in observation.reachable():
         if target.held:
             continue
         target_concept = memory.concepts.peek(target.appearance)
+        info_gain = memory.bank.concept_uncertainty(target_concept)
+
         for action in HYPOTHESIS_ACTIONS:
             s = spec(action)
             if s.needs_free_gripper and holding is not None:
@@ -130,10 +150,9 @@ def imagine(
 
             this_tool_id = holding if s.relational else None
             this_tool_concept = tool_concept if s.relational else None
+            key = (target_concept, action, this_tool_concept)
             belief = (
-                memory.bank.belief((target_concept, action, this_tool_concept))
-                if target_concept is not None
-                else None
+                memory.bank.belief(key) if target_concept is not None else None
             )
             lo_hi = belief.credible_interval if belief is not None else None
             hypotheses.append(
@@ -152,63 +171,13 @@ def imagine(
                     predicted_effect=(
                         belief.operator if belief is not None else None
                     ),
+                    irreversible_risk=(
+                        belief.irreversible_rate if belief is not None
+                        else _UNTESTED_IRREVERSIBLE_RISK
+                    ),
+                    info_gain=info_gain,
                     cost=s.cost,
-                    info_gain=compute_concept_info_gain(target_concept),
+                    relevance=(relevant_keys or {}).get(key, 0.0),
                 )
             )
-    import numpy as np
-    
-    def is_known(concept_id):
-        if concept_id is None: return False
-        for b in memory.bank.beliefs_for_concept(concept_id):
-            if b.status in (Status.PROVISIONAL, Status.CONFIRMED, Status.REFUTED, Status.STUCK):
-                return True
-        return False
-
-    reachable_objs = observation.reachable()
-    for i, target_a in enumerate(reachable_objs):
-        if target_a.held: continue
-        concept_a = memory.concepts.peek(target_a.appearance)
-        
-        for j, target_b in enumerate(reachable_objs):
-            if i == j or target_b.held: continue
-            dist_ab = float(np.linalg.norm(target_a.position - target_b.position))
-            if dist_ab > 0.5:
-                continue
-                
-            concept_b = memory.concepts.peek(target_b.appearance)
-            if not (is_known(concept_a) and is_known(concept_b)):
-                continue
-                
-            composite_concept = hash((concept_a, concept_b)) % 100000
-            
-            for action in HYPOTHESIS_ACTIONS:
-                s = spec(action)
-                if s.needs_free_gripper and holding is not None: continue
-                if s.needs_held_object and holding is None: continue
-                
-                this_tool_id = holding if s.relational else None
-                this_tool_concept = tool_concept if s.relational else None
-                
-                belief = memory.bank.derive_composite_belief(
-                    composite_concept, concept_a, concept_b, action, this_tool_concept
-                )
-                
-                lo_hi = belief.credible_interval if belief is not None else None
-                hypotheses.append(
-                    Hypothesis(
-                        target_id=f"{target_a.object_id}_{target_b.object_id}",
-                        action=action,
-                        tool_id=this_tool_id,
-                        target_concept=composite_concept,
-                        tool_concept=this_tool_concept,
-                        status=belief.status if belief is not None else Status.UNTESTED,
-                        predicted_mean=belief.mean if belief is not None else None,
-                        credible_width=(lo_hi[1] - lo_hi[0]) if lo_hi is not None else None,
-                        dominant_effect=belief.dominant_effect if belief is not None else None,
-                        predicted_effect=belief.operator if belief is not None else None,
-                        cost=s.cost,
-                    )
-                )
-                
     return tuple(hypotheses)

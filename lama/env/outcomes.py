@@ -81,7 +81,16 @@ class Outcome:
     displacement: float = 0.0        # metres moved across the support
     height_gain: float = 0.0         # metres raised clear of the support
     rotation: float = 0.0            # radians turned about the vertical axis
-    force_required: float = 0.0      # continuous resistance/force observed
+    force_required: float = 0.0      # magnitude of the object's observable
+                                      # response (whichever of displacement /
+                                      # height_gain / rotation the effect
+                                      # produced) -- a single continuous
+                                      # channel the affordance bank uses to
+                                      # notice when one learned concept is
+                                      # secretly a blend of two physically
+                                      # different kinds (see bank.py's
+                                      # bimodality check). Zero when the
+                                      # effect has no continuous magnitude.
     remote: tuple[RemoteEffect, ...] = field(default_factory=tuple)
     irreversible: bool = False
 

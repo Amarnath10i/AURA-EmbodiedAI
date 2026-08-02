@@ -1,23 +1,41 @@
 """Deciding which hypothesis is worth spending real budget to test.
 
-The acquisition function is deliberately simple: how much would testing this
-still teach the bank, per unit of budget it costs. "How much would it teach"
-is read straight off the belief the bank already holds:
+The core acquisition function is unchanged in spirit: how much would testing
+this still teach the bank, per unit of budget it costs. "How much would it
+teach" is read straight off the belief the bank already holds:
 
 * No belief at all -- never matched to a concept, or matched but never tried
   with this verb -- is maximal uncertainty, worth 1.0. There is nothing to
   lose by finding out.
-* `PROVISIONAL` is worth exactly the width of its credible interval: literally
-  how unsettled the bank's own estimate still is.
+* `PROVISIONAL` or `STUCK` is worth exactly the width of its credible
+  interval: literally how unsettled the bank's own estimate still is.
 * `CONFIRMED` or `REFUTED` is worth 0. The bank already knows the answer to
   the precision it needs; spending budget to narrow a settled belief further
   has no research value here, even though its interval is not literally zero
   width.
 
-Dividing by cost turns this into a genuine per-budget-unit acquisition score,
-so a cheap, moderately uncertain test can outrank an expensive, slightly more
-uncertain one -- which is the whole reason `env/actions.py` gives verbs
-different costs in the first place.
+Three further, MULTIPLICATIVE factors adjust that base score -- multiplicative
+so that none of them can turn an already-settled (score 0) hypothesis
+positive, which an earlier additive version of this function got wrong:
+
+* **Safety.** `(1 - irreversible_risk)` discounts anything the bank
+  estimates is likely to cause unrecoverable damage. A never-tested verb
+  starts at the uninformed prior (0.5 risk, a real but moderate discount, not
+  a block) and the discount relaxes quickly as evidence shows it usually is
+  not destructive -- see `Belief.irreversible_alpha/beta` in `memory/bank.py`.
+* **Concept-level curiosity.** A mild bonus for objects that are broadly
+  uncertain (`Hypothesis.info_gain`), not just uncertain about this one verb.
+* **Goal relevance.** A stronger bonus for hypotheses a backward-chaining
+  plan identified as being on the way to whatever goal the caller is
+  currently pursuing (`Hypothesis.relevance`; see `planner/planner.py` and
+  `imagination/hypothesis.py`'s `relevant_keys` argument). Zero unless a goal
+  was actually supplied, so this is a pure extension: nothing changes for a
+  caller that never sets a goal.
+
+Dividing the base score by cost is what makes this a genuine per-budget-unit
+acquisition score, so a cheap, moderately uncertain test can outrank an
+expensive, slightly more uncertain one -- which is the whole reason
+`env/actions.py` gives verbs different costs in the first place.
 """
 
 from __future__ import annotations
@@ -25,34 +43,41 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from ..imagination.hypothesis import Hypothesis
-from ..memory.bank import Status
+from ..memory.bank import SETTLED_STATUSES
 
-#: Statuses the bank considers settled; testing them further scores zero.
-_SETTLED = frozenset({Status.CONFIRMED, Status.REFUTED})
+#: Weight on the concept-level curiosity bonus. Deliberately modest: this
+#: should nudge between similarly-uncertain options, not override the
+#: primary per-verb uncertainty signal.
+INFO_GAIN_WEIGHT: float = 0.5
+
+#: Weight on the goal-relevance bonus. Larger than the curiosity weight: an
+#: active goal should meaningfully reorder what gets tried first, which is
+#: the entire point of wiring a planner in at all.
+RELEVANCE_WEIGHT: float = 2.0
 
 
 def uncertainty(hypothesis: Hypothesis) -> float:
     """How much a real test of `hypothesis` would still teach the bank, in
     `[0, 1]`: 0 means settled, 1 means totally unknown."""
-    if hypothesis.status in _SETTLED:
+    if hypothesis.status in SETTLED_STATUSES:
         return 0.0
     if hypothesis.credible_width is None:
         return 1.0
     return hypothesis.credible_width
 
 
-from ..env.outcomes import IRREVERSIBLE_EFFECTS
-
 def score(hypothesis: Hypothesis) -> float:
-    """Expected information gained per unit of budget spent testing this."""
+    """Expected information gained per unit of budget spent testing this,
+    discounted for irreversibility risk and boosted for curiosity/relevance.
+    """
     u = uncertainty(hypothesis)
-    
-    # Hard-gate: prevent selection of irreversible actions if uncertainty is too high
-    if hypothesis.dominant_effect in IRREVERSIBLE_EFFECTS and u > 0.5:
+    if u <= 0.0:
         return 0.0
-        
-    base_score = u / hypothesis.cost if u > 0.0 else 0.0
-    return base_score + hypothesis.relevance + hypothesis.info_gain
+    base = u / hypothesis.cost
+    safety = 1.0 - hypothesis.irreversible_risk
+    curiosity = 1.0 + INFO_GAIN_WEIGHT * hypothesis.info_gain
+    goal = 1.0 + RELEVANCE_WEIGHT * hypothesis.relevance
+    return base * safety * curiosity * goal
 
 
 def rank(hypotheses: Iterable[Hypothesis]) -> tuple[Hypothesis, ...]:

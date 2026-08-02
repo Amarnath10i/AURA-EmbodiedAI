@@ -1,17 +1,16 @@
 """`AffordanceMemory`: the single object the rest of the system talks to.
 
-Concepts, the bank, and the ledger are each independently simple; the only
-real job left is translating between the environment's vocabulary (opaque,
+Concepts, the bank, and the ledger are each independently simple; the real
+jobs left are (1) translating between the environment's vocabulary (opaque,
 episode-scoped object ids) and memory's vocabulary (concept ids that persist
-for the agent's whole lifetime). That translation happens exactly once, here,
-so nothing downstream has to know that object ids are not what they are keyed
-on.
+for the agent's whole lifetime), and (2) reacting when the bank notices a
+concept looks like it secretly blends two real kinds.
 """
 
 from __future__ import annotations
 
 from ..env import InteractionRecord, Observation
-from .bank import AffordanceBank, Revision
+from .bank import AffordanceBank, Revision, Status
 from .concepts import ConceptCodebook
 from .log import InteractionLog
 
@@ -69,35 +68,53 @@ class AffordanceMemory:
                     tool_view.appearance, record.episode, record.t
                 )
 
+        # A remote effect names an object elsewhere in the world (see
+        # outcomes.RemoteEffect); resolving it to a concept is what lets the
+        # bank later say "pressing this tends to open THAT KIND of thing",
+        # not just "tends to open something". peek(), not assign(): merely
+        # noticing a remote object changed must not be treated as having
+        # interacted with it.
+        remote_concepts = tuple(
+            self._peek_concept(before, re.object_id)
+            for re in record.outcome.remote
+        )
+
         self.log.append(
             episode=record.episode, t=record.t, target_concept=target_concept,
             action=interaction.action, tool_concept=tool_concept,
             outcome=record.outcome, cost=record.cost,
             object_id=interaction.target, tool_id=record.tool_id,
         )
-        from .bank import Status, Belief
-        
+
         revision = self.bank.observe(
             target_concept, interaction.action, tool_concept, record.outcome,
             episode=record.episode, t=record.t,
             object_id=interaction.target, tool_id=record.tool_id,
+            remote_concepts=remote_concepts,
         )
-        
-        if revision and revision.new_status == Status.STUCK:
-            belief = self.bank.belief(revision.key)
-            if belief:
-                forces = [ev.force_required for ev in belief.evidence]
-                if len(forces) >= 2:
-                    mean_f = sum(forces) / len(forces)
-                    var_f = sum((f - mean_f)**2 for f in forces) / len(forces)
-                    std_f = var_f ** 0.5
-                    if std_f > 0.1:  # Significant variance indicates two populations
-                        id_a, id_b = self.concepts.split_concept(target_concept)
-                        # Re-open the belief as PROVISIONAL under the new concepts
-                        for new_id in (id_a, id_b):
-                            new_key = (new_id, interaction.action, tool_concept)
-                            self.bank._beliefs[new_key] = Belief(
-                                key=new_key, alpha=1.5, beta=1.5, total_attempts=2
-                            )
-                            
+
+        if revision is not None and revision.new_status is Status.STUCK:
+            self._split_concept(revision.key, target_concept, record.episode)
+
         return revision
+
+    def _peek_concept(self, before: Observation, object_id: str) -> int | None:
+        view = before.view(object_id)
+        if view is None:
+            return None
+        return self.concepts.peek(view.appearance)
+
+    def _split_concept(
+        self, key: tuple, target_concept: int, episode: int
+    ) -> None:
+        """A belief just turned STUCK: its evidence looks bimodal, meaning
+        `target_concept` probably blends two real kinds (see bank.py's
+        module docstring). Ask the codebook to split it, and give each
+        resulting concept a fresh, mildly-informative belief at the same key
+        -- the old, blended evidence is not trustworthy for either half, so
+        restarting cleanly is correct, not wasteful.
+        """
+        action, tool_concept = key[1], key[2]
+        id_a, id_b = self.concepts.split_concept(target_concept)
+        for new_id in (id_a, id_b):
+            self.bank.reopen((new_id, action, tool_concept))

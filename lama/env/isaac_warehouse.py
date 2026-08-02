@@ -462,11 +462,19 @@ class IsaacWarehouse(Environment):
             target.toppled = True
 
         remote = self._trigger(aff, target)
+        # Only TRANSLATED's displacement is genuinely correlated with the
+        # target's own hidden mass (via _physical_shove). SUPPORTED's
+        # "displacement" is geometric distance carried before setting down --
+        # noise with respect to any hidden property -- and LIFTED/ROTATED are
+        # currently fixed/nominal; feeding either into force_required would
+        # let pure noise trigger the bimodality check in memory/bank.py.
+        force_required = displacement if effect is Effect.TRANSLATED else 0.0
         return Outcome(
             effect=effect,
             displacement=displacement,
             height_gain=height_gain,
             rotation=rotation,
+            force_required=force_required,
             remote=remote,
             irreversible=effect in (Effect.TOPPLED, Effect.BROKE),
         )
