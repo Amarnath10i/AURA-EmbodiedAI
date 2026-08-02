@@ -20,11 +20,19 @@ to decide where to walk when nothing reachable is worth testing.
 `exploration.select_exploration_target` picks the not-yet-reachable object
 with the best expected-information-gain-per-distance, the same acquisition
 principle `select.py` uses for testing, rather than simply the closest thing.
+
+**`select_fn` is a deliberate seam for research comparisons.** Everything
+else -- the environment, memory's Bayesian adjudication, exploration target
+selection -- is held constant; swapping only the selection policy is what
+makes `evaluation/baselines.py`'s random/novelty/uncertainty-only policies a
+CONTROLLED comparison against the full system (`select.select_next`, the
+default) rather than a confound of also-different environments or scoring.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from ..env import Action, Environment, Interaction, Observation, StepResult
 from ..env.actions import cost as action_cost
@@ -34,6 +42,11 @@ from ..memory.bank import Revision
 from ..memory.memory import AffordanceMemory
 from ..planner import Goal, RegressionPlanner
 from .select import select_next
+
+#: `(hypotheses, budget_remaining) -> Hypothesis | None`, matching
+#: `select.select_next`'s signature -- the type every selection policy
+#: (the real one, and every baseline in `evaluation/baselines.py`) implements.
+SelectFn = Callable[[tuple[Hypothesis, ...], float], "Hypothesis | None"]
 
 
 @dataclass(frozen=True)
@@ -57,19 +70,24 @@ def verify_once(
     memory: AffordanceMemory,
     observation: Observation,
     goal: Goal | None = None,
+    select_fn: SelectFn = select_next,
 ) -> VerificationStep:
     """Imagine, select, and either test a hypothesis or move toward one.
 
     `observation` must be whatever `env` most recently returned -- from
     `reset` or the previous `step` -- since `Environment` has no way to ask
     for the current observation without stepping.
+
+    `select_fn` defaults to the real system (`select.select_next`); pass one
+    of `evaluation.baselines`' policies to run a controlled comparison
+    through this exact same loop instead.
     """
     relevant_keys = None
     if goal is not None:
         relevant_keys = RegressionPlanner(memory.bank).relevant_keys(goal)
 
     hypotheses = imagine(observation, memory, relevant_keys)
-    chosen = select_next(hypotheses, env.budget_remaining)
+    chosen = select_fn(hypotheses, env.budget_remaining)
     if chosen is not None:
         step = env.step(Interaction(chosen.action, chosen.target_id))
         revision = memory.observe(observation, step.record)
@@ -88,6 +106,7 @@ def run_episode(
     memory: AffordanceMemory,
     seed: int | None = None,
     goal: Goal | None = None,
+    select_fn: SelectFn = select_next,
 ) -> tuple[VerificationStep, ...]:
     """Run one episode of the loop to completion.
 
@@ -98,7 +117,7 @@ def run_episode(
     observation = env.reset(seed=seed)
     steps: list[VerificationStep] = []
     while env.budget_remaining > 0:
-        result = verify_once(env, memory, observation, goal)
+        result = verify_once(env, memory, observation, goal, select_fn)
         if result.step is None:
             break
         steps.append(result)
