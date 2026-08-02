@@ -187,30 +187,44 @@ episodes: total interactions per 20-episode block fell from 982 to 455, goal
 pursuit switched on automatically once anything was confirmed to open, and two
 real concept splits fired during ordinary play.
 
-## Evaluation plan
+## Evaluation and results
 
-| Metric | What it shows |
-|---|---|
-| Interactions per confirmed affordance | Verification efficiency, the headline number |
-| Precision of the affordance bank vs hidden ground truth | Whether "confirmed" means correct |
-| Recall over the reachable affordance set | Whether targeting leaves blind spots |
-| Retention across tasks and layouts | Whether the knowledge is lifelong or forgotten |
-| Transfer to held-out object kinds | Whether the representation generalises |
+`lama/evaluation/` measures interactions per confirmed affordance, precision
+and recall against hidden ground truth (broken out by `PRIMARY`/`SECONDARY`/
+`INCIDENTAL` role -- the headline split, see below), retention across tasks,
+and transfer to held-out kinds. `scripts/run_baseline_comparison.py` runs
+LAMA's full selection policy against three baselines -- random,
+novelty-driven (Plan2Explore-style), and uncertainty-only (LAMA's core
+acquisition function with the safety/curiosity/goal bonuses removed) -- plus
+a targeted safety-discount ablation, through the identical environment and
+adjudication.
 
-Baselines to beat: random interaction, curiosity/novelty-driven interaction,
-and uncertainty-driven interaction without the counterfactual and adjudication
-steps. The third is the one that matters; the first two are sanity floors.
+**Full account: `docs/RESEARCH_FINDINGS.md`.** The short version, from a real
+15-seed x 40-episode run: LAMA's full system clearly wins on overall recall,
+primary-affordance recall, and interactions-per-confirmed-affordance (115.3
+vs 184.5 for random). On the one metric this project's design is actually
+organised around -- **secondary**-affordance recall -- it does not win: the
+ordering *inverts* (uncertainty-only 0.122 > LAMA 0.103), and the reason is
+identifiable rather than noise: secondary affordances live disproportionately
+behind `PLACE_ON` and `TIP`, and LAMA's curiosity and safety refinements --
+which correctly improve the aggregate case -- specifically deprioritise
+exactly those. That is reported as a real, measured trade-off, not smoothed
+into "LAMA wins", because the prior work this project grew from
+(`files/EmbodiedAI.zip`) is worth citing again for modelling exactly that
+standard: it reported InfoNCE scoring *below* random initialisation, plainly.
 
 ## Repository layout
 
 ```
-lama/                       the LAMA system
-scripts/isaac_smoke_test.py isolates an Isaac Lab install problem from this project's code
-scripts/run_lama_isaac.py   runs the verification loop against the Isaac backend
-scripts/run_lifelong.py     runs many episodes on one persistent memory, reports improvement over time
-docs/DECISIONS.md           why the project is built this way
-docs/ISAAC_LAB_SETUP.md     Isaac Lab backend setup, pinned versions, current status
-outputs/                    real experiment results from both backends
+lama/                            the LAMA system
+scripts/isaac_smoke_test.py      isolates an Isaac Lab install problem from this project's code
+scripts/run_lama_isaac.py        runs the verification loop against the Isaac backend
+scripts/run_lifelong.py          runs many episodes on one persistent memory, reports improvement over time
+scripts/run_baseline_comparison.py  LAMA vs random/novelty/uncertainty-only, across seeds
+docs/DECISIONS.md                why the project is built this way
+docs/RESEARCH_FINDINGS.md        gaps addressed, experiments run, results including where LAMA does not win
+docs/ISAAC_LAB_SETUP.md          Isaac Lab backend setup, pinned versions, current status
+outputs/                         real experiment results from both backends and the baseline comparison
 aura_warehouse_sim/         prior work: AURA navigation-only warehouse prototype
 AURA_Project_Plan.pdf       prior work: the AURA research plan this project grew from
 files/EmbodiedAI.zip        prior work: an earlier object-function-discovery project

@@ -457,3 +457,50 @@ cascading re-splits were not just wasteful bookkeeping, they were actively
 destroying accumulated evidence by resetting fresh, weak-prior beliefs on
 every re-split. The validated lever/switch benefit (73/27, 88/12 sorting)
 is unaffected, confirmed by rerunning that specific check after the change.
+
+---
+
+## D8. A real baseline comparison, and an honest negative-ish result on it
+
+**Decision.** Built the empirical comparison this project had never actually
+run: `verification/loop.py`'s `select_fn` seam lets any selection policy
+drive the identical environment/memory/adjudication pipeline, so
+`evaluation/baselines.py` (random, novelty-driven, uncertainty-only, and a
+targeted safety-ablation) and the full system can be compared with nothing
+else varying. `evaluate_precision_recall` now breaks recall out by affordance
+role (`PRIMARY`/`SECONDARY`/`INCIDENTAL`), because an aggregate number cannot
+show whether targeted verification helps specifically where the research
+question says it should matter most -- see D5.
+
+**Result, run for real at 15 seeds x 40 episodes (full account in
+`docs/RESEARCH_FINDINGS.md`, raw data in
+`outputs/baseline_comparison_with_ablation.json`).** LAMA's full system
+clearly wins on overall recall,
+primary-affordance recall, and interactions-per-confirmed-affordance (115.3
+vs 184.5 for random, tightest variance of any policy). On secondary-
+affordance recall specifically -- the actual headline metric -- it does
+NOT win: the ordering inverts, uncertainty_only (0.122) > lama_no_safety
+(0.113) > lama (0.103), each of LAMA's efficiency-oriented refinements
+(cost-normalisation + curiosity, then safety) making secondary discovery
+modestly worse while making everything else better.
+
+**Why this was reported rather than reframed.** The pattern is
+mechanistically explainable, not noise: secondary affordances in this
+catalogue live disproportionately behind `PLACE_ON` (a specific relational
+combination, not what a concept-level curiosity bonus rewards) and `TIP`
+(irreversible by design for barrel/drum, which the safety discount exists
+specifically to deprioritise). Both refinements do exactly what they were
+built to do; they are simply in tension with fast discovery of the hardest,
+rarest affordance class. Softening this into "LAMA wins overall" would have
+been technically true and substantively misleading about the one number the
+project's own design says matters most. The prior project in this
+repository's history (`files/EmbodiedAI.zip`) is worth citing again here
+specifically because its README modeled this: reporting that InfoNCE scores
+below random initialisation, plainly, rather than omitting it.
+
+**Not yet done.** `evaluate_retention`/`evaluate_transfer` are implemented
+and tested for correctness but not run at this statistical scale. The two
+concrete follow-ups this result motivates -- a relational-verb-specific
+discovery bonus, and letting the planner relax the safety discount once it
+has established no safer route reaches the same goal -- are proposed in
+`docs/RESEARCH_FINDINGS.md`, not implemented.
