@@ -58,8 +58,8 @@ Early. The environment is the current work.
 | Verification selection | working |
 | Verification execution and adjudication | working |
 | Lifelong affordance bank | working |
-| Planner over confirmed knowledge | not started |
-| Evaluation harness and baselines | not started |
+| Planner over confirmed knowledge | working (backward-chaining regression search) |
+| Evaluation harness and baselines | working |
 
 ## The environment
 
@@ -91,9 +91,13 @@ interaction records and concluded volume was the bottleneck.
 A second backend, `lama/env/isaac_warehouse.py`, implements the exact same
 contract on top of Isaac Lab -- real PhysX rigid bodies, so hidden mass drives
 push/pull/rotate/tip displacement through actual physics rather than a
-formula. It is **written but never run**: no RTX-class GPU has been available
-to test it. It is verified as far as possible without one (see
-`docs/ISAAC_LAB_SETUP.md`) and is waiting on real hardware to confirm the rest.
+formula. It was written unverified (no RTX-class GPU was available while
+writing it) and has since run on the target RTX 4060 machine -- `outputs/`
+holds real per-episode results from 10- and 50-episode runs against it,
+strong evidence it works, though that data predates the fixes in
+`docs/DECISIONS.md` D7, so it confirms the backend runs, not the current code
+specifically. `scripts/isaac_smoke_test.py` and `scripts/run_lama_isaac.py`
+are the way to check the code as it stands now.
 
 ## Memory
 
@@ -120,6 +124,16 @@ plate works, at a remote-effect (door-opens) rate of about 50%. It cannot do
 better than that, because appearance genuinely cannot tell the two apart, and
 the numbers say so instead of hiding it.
 
+That is not the end of the story, though. A `STUCK` status fires when a
+belief's continuous evidence (how far a push actually moved something) looks
+bimodal -- the statistical signature of two blended kinds -- and
+`ConceptCodebook.split_concept` then tries to separate them. For crate/block
+specifically (identical appearance, zero true separation) that stays at
+chance, honestly: no algorithm recovers a signal that is not there. For the
+catalogue's other two look-alike pairs, `lever`/`switch` and `barrel`/`drum`
+(small but nonzero true separation), splitting measurably works -- about
+73/27 and 88/12 correct sorting in testing, up from 50/50.
+
 ## Imagination and verification
 
 The loop from observation to memory is closed and runs end to end:
@@ -142,11 +156,36 @@ failures (see the bank's calibration), and the acquisition function scores
 per key, not across the whole reachable set. In practice this means a cheap,
 persistently-failing verb on a single object can consume most of an episode's
 budget before the loop ever moves on -- confirmed by a pinned regression test,
-not just suspected. There is no navigation or exploration planning yet either:
-`imagine`/`select` only propose verbs on what is already in reach, so the loop
-falls back to walking toward the nearest unreached object when nothing
-reachable is worth testing. Both are real gaps `planner/` should close, not
-problems papered over here.
+not just suspected. This is no longer papered over by a dummy fallback: when
+nothing reachable is worth testing, `lama/exploration/` picks the
+not-yet-reachable object with the best expected-information-gain per unit of
+walking distance, not simply the nearest one -- but it still cannot escape a
+single object's budget-grinding once the agent is already standing next to it,
+which is exactly what the pinned regression test above is there to catch if a
+future change fixes it.
+
+## Planning and self-improvement
+
+`lama/planner/` does real STRIPS-style backward chaining over the bank's
+*confirmed* operators: given a goal ("some object of concept X should reach
+effect E"), it searches backward for a chain of verbs that reaches it,
+discovering genuine multi-step structure -- the project's own flagship case
+requires GRASPing the block before `PLACE_ON` opens the door, and the planner
+finds that ordering, not just the direct step. Its output feeds
+`Hypothesis.relevance`, which `select.py` folds in multiplicatively alongside
+a safety discount for irreversible outcomes and a mild curiosity bonus for
+broadly-uncertain objects. A goal reorders what gets tried first; it never
+restricts what CAN be tried, and leaving it unset changes nothing.
+
+`scripts/run_lifelong.py` is the concrete, honest form "self-improvement"
+takes given this architecture: there is no neural network in the working core
+to gradient-train, so getting better over time means running many episodes on
+one persistent memory and checking whether later episodes need less budget per
+unit of newly-settled knowledge than earlier ones. Goals are derived from the
+agent's own confirmed beliefs, never the oracle. Run for real over 100
+episodes: total interactions per 20-episode block fell from 982 to 455, goal
+pursuit switched on automatically once anything was confirmed to open, and two
+real concept splits fired during ordinary play.
 
 ## Evaluation plan
 
@@ -165,11 +204,13 @@ steps. The third is the one that matters; the first two are sanity floors.
 ## Repository layout
 
 ```
-lama/                       the LAMA system (new work)
+lama/                       the LAMA system
 scripts/isaac_smoke_test.py isolates an Isaac Lab install problem from this project's code
 scripts/run_lama_isaac.py   runs the verification loop against the Isaac backend
+scripts/run_lifelong.py     runs many episodes on one persistent memory, reports improvement over time
 docs/DECISIONS.md           why the project is built this way
 docs/ISAAC_LAB_SETUP.md     Isaac Lab backend setup, pinned versions, current status
+outputs/                    real experiment results from both backends
 aura_warehouse_sim/         prior work: AURA navigation-only warehouse prototype
 AURA_Project_Plan.pdf       prior work: the AURA research plan this project grew from
 files/EmbodiedAI.zip        prior work: an earlier object-function-discovery project

@@ -269,3 +269,158 @@ installed Isaac Lab version. Only real hardware settles that.
 **What "done" looks like next.** Someone runs `scripts/isaac_smoke_test.py`
 on the RTX 4060 machine, reports what breaks, and it gets fixed from a real
 traceback instead of more documentation research.
+
+---
+
+## D7. Reconciling substantial untracked upstream work; the combinatorics,
+disambiguation, and safety problems
+
+**Context.** Between sessions, the repository was cloned onto the target RTX
+4060 machine and, separately from this assistant, ten more commits were
+pushed directly to the remote (also renamed AURA-EmbodiedAI to
+LAMA-EmbodiedAI on GitHub in the process): a substantial batch implementing
+"LAMA Phases 0-6" plus SOTA-labelled components -- CEM/MPPI planners, active
+exploration, a DreamerV3-style world model, curiosity modules, an evaluation
+harness -- together with real experiment output (outputs/) from actual runs
+against both the numpy and Isaac Lab backends. The local clone was a strict
+ancestor of the new remote head, so reconciling was a plain fast-forward, no
+merge conflict.
+
+**That work was reviewed in full before anything was built on top of it**,
+because roughly 1300 lines of new functionality had shipped with zero new
+test coverage. The review found:
+
+- exploration/active.py could not be imported at all (it tried to import a
+  ConceptMemory class that does not exist -- the real class is
+  ConceptCodebook) and, even fixed, called Environment.step() with the
+  wrong signature in three places.
+- MPPIPlanner.plan() referenced self.discount, which MPPIPlanner.__init__
+  never set -- a guaranteed crash the first time it ran.
+- The composite-hypothesis code in hypothesis.py built Hypothesis objects
+  with a synthetic target_id like "obj_03_obj_07" that names no real
+  object; env.step() raises KeyError on it. It also had a real collision
+  risk against genuine concept ids (hash((a, b)) % 100000) and generated
+  each pair twice, asymmetrically.
+- AffordanceBank.__init__ unconditionally opened and appended to
+  outputs/bank_history.jsonl on every single .observe() call -- a
+  relative-path disk write on the hot path, at the 10^4-10^5 interaction
+  scale this project targets.
+- select.py's own, separately-declared settled-status set omitted the new
+  STUCK status, so a belief the bank had just flagged as probably blending
+  two kinds scored as maximally worth testing instead of being
+  deprioritised -- the opposite of the intended effect.
+- evaluation/eval.py called env.oracle (neither backend has this
+  attribute) and oracle.ground_truth_affordances() (no such method), and
+  compared belief.key (agent concept ids) directly against ground-truth
+  keys (kind names) -- two incompatible key spaces that could never match,
+  so precision/recall would have silently been meaningless even with the
+  crashes fixed.
+- Two separate, redundant, untrained DreamerV3-style RSSM implementations
+  (models/world_model.py, world_model/rssm.py) and a curiosity module
+  (ICM/RND/contrastive) with zero consumers anywhere, targeting a 96x96
+  image observation space this project does not use.
+
+**Decision: keep and substantially develop the pieces that were genuinely
+aligned with the project and the owner's stated goals; remove the rest
+outright rather than patch around it.** Removed: both duplicate world
+models, curiosity, CEMPlanner/MPPIPlanner, the broken composite-hypothesis
+code, and the unconditional disk logging. Kept and rebuilt: RegressionPlanner
+(the one genuinely classical-AI, backward-chaining piece, which is also
+exactly what was asked for), active exploration, and the evaluation harness.
+Reasoning: a disconnected, untested, crash-prone module produces negative
+value just by existing in the tree -- it looks like coverage of a capability
+that is not actually there, which is worse than the capability being
+visibly absent from the README's status table.
+
+**The three problems the owner asked to be solved.**
+
+1. Combinatorial verb search. planner/planner.py's RegressionPlanner now
+   does real STRIPS-style backward chaining: operators carry genuine
+   preconditions (a verb's public needs_free_gripper/needs_held_object, not
+   a placeholder), so chaining discovers real multi-step structure --
+   verified against the project's own flagship case, where reaching the
+   goal requires GRASPing the block before PLACE_ON can work, and the
+   planner finds that ordering. relevant_keys() feeds a
+   (concept, verb, tool) relevance weight into Hypothesis.relevance, which
+   select.py now folds in multiplicatively. This does not shrink the
+   hypothesis space by refusing options; it reorders it so the search tries
+   goal-relevant combinations first, which is what actually matters when the
+   verb set keeps growing. Left unset, a goal changes nothing --
+   uncertainty-driven exploration is the default, goals are additive.
+
+2. Objects that look identical but are not (the owner's "hollow vs solid
+   sphere" example; this project's existing embodiment is the crate/block
+   trap). Outcome.force_required is now populated by both backends -- only
+   for the TRANSLATED effect specifically, since PLACE_ON's "displacement"
+   is geometric distance carried, not mass-correlated, and feeding it in
+   caused spurious false positives (caught by a facade test failing after
+   the change, before this note was written). Belief.status gained STUCK,
+   triggered by a real gap-statistic bimodality test over force_required
+   (not the imported version's interval-plateau heuristic, which is
+   mathematically guaranteed to eventually fire on any heavily-tested,
+   not-yet-confirmed belief regardless of whether it is actually blended).
+   ConceptCodebook.split_concept now uses a seeded RNG (the imported version
+   used the unseeded global numpy RNG, breaking this project's core
+   determinism guarantee) and, given enough buffered recent observations,
+   an SVD to find a genuine separating direction rather than a functionally
+   negligible fixed perturbation.
+
+   **Empirically validated, and the result is worth stating precisely.**
+   For lever/switch and barrel/drum -- the catalogue's two OTHER look-alike
+   pairs, whose true appearance separation is small but nonzero (~0.10, see
+   D5/catalogue.py) -- splitting measurably improves future recognition:
+   73/27 and 88/12 in testing, against 50/50 before. For crate/block, whose
+   true separation is exactly zero, splitting still helps (each half
+   accumulates independent evidence going forward) but future recognition
+   stays at 50/50. That is not a bug in the split logic; it is the honest
+   mathematical floor of what appearance alone can ever recover. No
+   algorithm, however clever, can find a signal that genuinely is not
+   present in the input. Where the real "hollow vs solid sphere" case sits
+   on that spectrum -- whether it has SOME visual tell or none -- determines
+   whether this mechanism can help it prospectively or only after the fact,
+   per instance, through interaction. That is a fact about the physical
+   scenario, not about the algorithm.
+
+3. AI safety for irreversible actions. The imported gate only blocked
+   selection once dominant_effect already showed TOPPLED/BROKE as the
+   majority outcome -- reactive, requiring several things to have already
+   broken. Replaced with Belief.irreversible_alpha/beta, a Beta posterior
+   updated from every observed Outcome.irreversible (conditioned on
+   success, mirroring remote_alpha/beta), starting at the uninformed
+   Beta(1, 1) prior. A first attempt at a possibly-destructive verb is
+   therefore moderately discounted by construction -- caution before the
+   fact, not after -- and the discount relaxes quickly as evidence
+   accumulates either way. select.py's scoring was also restructured from
+   an ad hoc base + relevance + info_gain (which could make an
+   already-settled, zero-score hypothesis positive again -- a real latent
+   bug) to strictly multiplicative
+   uncertainty/cost * safety * curiosity * goal, so nothing can revive a
+   settled score.
+
+**Self-improvement, requested separately mid-session.** There is no neural
+network in the working core to gradient-train -- the affordance bank IS the
+model (imagination/hypothesis.py's own docstring). scripts/run_lifelong.py
+is the honest form this takes given that: run many episodes on one
+persistent AffordanceMemory, derive goals from the agent's OWN confirmed
+beliefs (never the oracle -- it is not cheating to pursue a goal about a door
+once the agent has genuinely confirmed for itself that the door can open),
+and report whether later episodes need less budget than earlier ones. Run
+for real over 100 episodes: total interactions per 20-episode block fell
+from 982 to 455, goal pursuit switched on automatically at episode 54 once
+something was confirmed to reach OPENED, two real STUCK-to-split events
+fired during ordinary play (not only the synthetic tests), and several
+confirmed beliefs with a nonzero remote_rate turned up unprompted --
+genuine secondary-affordance discovery. The interactions-per-newly-confirmed
+figure is noisier block to block than the total; that is consistent with the
+already-documented budget-grinding limitation and small per-block sample
+size, and is reported as observed rather than smoothed over.
+
+**On the real Isaac Lab evidence found in outputs/.** The committed
+isaac_10ep_results.json / isaac_50ep_results.json are structured exactly
+like this project's own IsaacWarehouseOracle.summary() and per-episode
+verification-loop stats, which is reasonably strong evidence the Isaac Lab
+backend (D6, written entirely unverified) was actually exercised on real
+hardware and did not immediately fail. That data predates every fix in this
+entry, so it validates that the backend runs at all, not the current code
+specifically -- scripts/isaac_smoke_test.py and scripts/run_lama_isaac.py
+remain the way to check the code as it stands now.
